@@ -2320,6 +2320,8 @@ channel_connect(const tor_addr_t *addr, uint16_t port,
                 const char *id_digest,
                 const ed25519_public_key_t *ed_id)
 {
+  int quic = get_options()->QUIC;
+  log_info(LD_CHANNEL, "channel_connect called, quic=%d", quic);
   return channel_tls_connect(addr, port, id_digest, ed_id);
 }
 
