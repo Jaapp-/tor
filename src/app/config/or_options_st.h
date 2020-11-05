@@ -808,6 +808,10 @@ struct or_options_t {
    * error out?  Only altered on testing networks. */
   int ClientBootstrapConsensusMaxInProgressTries;
 
+  /** If true, use QUIC as transport protocol of channels.
+   */
+  int QUIC;
+
   /** If true, we take part in a testing network. Change the defaults of a
    * couple of other configuration options and allow to change the values
    * of certain configuration options. */
