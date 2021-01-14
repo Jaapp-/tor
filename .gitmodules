@@ -1,3 +1,6 @@
 [submodule "src/ext/rust"]
 	path = src/ext/rust
 	url = https://git.torproject.org/tor-rust-dependencies
+[submodule "src/lib/quiche"]
+	path = src/lib/quiche
+	url = https://github.com/cloudflare/quiche
