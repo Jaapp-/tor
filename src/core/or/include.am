@@ -5,6 +5,7 @@ LIBTOR_APP_A_SOURCES += 				\
 	src/core/or/channel.c			\
 	src/core/or/channelpadding.c		\
 	src/core/or/channeltls.c		\
+	src/core/or/channelquic.c		\
 	src/core/or/circuitbuild.c		\
 	src/core/or/circuitlist.c		\
 	src/core/or/circuitmux.c		\
@@ -45,6 +46,7 @@ noinst_HEADERS +=					\
 	src/core/or/channel.h				\
 	src/core/or/channelpadding.h			\
 	src/core/or/channeltls.h			\
+	src/core/or/channelquic.h			\
 	src/core/or/circuit_st.h			\
 	src/core/or/circuitbuild.h			\
 	src/core/or/circuitlist.h			\

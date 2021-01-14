@@ -622,6 +622,9 @@ typedef struct channel_listener_t channel_listener_t;
 
 typedef struct channel_tls_t channel_tls_t;
 
+typedef struct channel_quic_t channel_quic_t;
+
+
 /* circuitmux_t typedef; struct circuitmux_t is in circuitmux.h */
 
 typedef struct circuitmux_t circuitmux_t;

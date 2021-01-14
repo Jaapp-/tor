@@ -140,7 +140,7 @@ TOR_INTERNAL_LIBS = \
 	src/trunnel/libor-trunnel.a \
 	src/lib/libtor-trace.a \
 	src/lib/quiche/target/release/libquiche.a \
-	-ldl -lpthread
+	-ldl
 
 libtor.a: $(TOR_INTERNAL_LIBS)
 	$(AM_V_AR) export AR="$(AR)"; \
