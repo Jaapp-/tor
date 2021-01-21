@@ -139,8 +139,7 @@ TOR_INTERNAL_LIBS = \
 	$(TOR_UTIL_LIBS) \
 	src/trunnel/libor-trunnel.a \
 	src/lib/libtor-trace.a \
-	src/lib/quiche/target/release/libquiche.a \
-	-ldl
+	src/lib/quiche/target/release/libquiche.a
 
 libtor.a: $(TOR_INTERNAL_LIBS)
 	$(AM_V_AR) export AR="$(AR)"; \
@@ -161,8 +160,7 @@ TOR_INTERNAL_TESTING_LIBS = \
 	$(TOR_UTIL_TESTING_LIBS) \
 	src/trunnel/libor-trunnel-testing.a \
 	src/lib/libtor-trace.a \
-	src/lib/quiche/target/release/libquiche.a \
-	-ldl -lpthread
+	src/lib/quiche/target/release/libquiche.a
 
 src/test/libtor-testing.a: $(TOR_INTERNAL_TESTING_LIBS)
 	$(AM_V_AR) export AR="$(AR)"; \

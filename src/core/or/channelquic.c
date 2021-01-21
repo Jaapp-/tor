@@ -15,6 +15,6 @@
 
 channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const char *id_digest,
                                 const struct ed25519_public_key_t *ed_id) {
-  printf("Quiche version: %s\n", quiche_version());
+//  printf("Quiche version: %s\n", quiche_version());
   return NULL;
 }
