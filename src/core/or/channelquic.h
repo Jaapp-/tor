@@ -1,11 +1,15 @@
 #ifndef TOR_CHANNELQUIC_H
 #define TOR_CHANNELQUIC_H
 
+#define LOCAL_CONN_ID_LEN 16
+
+#define MAX_DATAGRAM_SIZE 1350
+
 struct channel_quic_t {
     /* Base channel_t struct */
     channel_t base_;
 //    /* or_connection_t pointer */
-//    or_connection_t *conn;
+    or_connection_t *conn;
 };
 
 
@@ -23,5 +27,18 @@ channel_t * channel_quic_connect(const tor_addr_t *addr, uint16_t port,
 channel_listener_t * channel_quic_get_listener(void);
 channel_listener_t * channel_quic_start_listener(void);
 channel_t * channel_quic_handle_incoming(or_connection_t *orconn);
+
+
+/* Things for connection_or.c to call back into */
+void channel_quic_handle_cell(cell_t *cell, or_connection_t *conn);
+void channel_quic_handle_state_change_on_orconn(channel_quic_t *chan,
+                                               or_connection_t *conn,
+                                               uint8_t state);
+void channel_quic_handle_var_cell(var_cell_t *var_cell,
+                                 or_connection_t *conn);
+void channel_quic_update_marks(or_connection_t *conn);
+
+/* Cleanup at shutdown */
+void channel_quic_free_all(void);
 
 #endif //TOR_CHANNELQUIC_H
