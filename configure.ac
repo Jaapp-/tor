@@ -2171,6 +2171,9 @@ syslog_facility="$withval", syslog_facility="LOG_DAEMON")
 AC_DEFINE_UNQUOTED(LOGFACILITY,$syslog_facility,[name of the syslog facility])
 AC_SUBST(LOGFACILITY)
 
+TOR_QUICHE_LIBS="-lquiche"
+AC_SUBST(TOR_QUICHE_LIBS)
+
 # Check if we have getresuid and getresgid
 AC_CHECK_FUNCS(getresuid getresgid)
 
