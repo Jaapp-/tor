@@ -1464,6 +1464,10 @@ connection_listener_new(const struct sockaddr *listensockaddr,
   if (listensockaddr->sa_family == AF_INET ||
       listensockaddr->sa_family == AF_INET6) {
     int is_stream = (type != CONN_TYPE_AP_DNS_LISTENER);
+    if (type == CONN_TYPE_OR_LISTENER && options->QUIC) {
+      log_info(LD_NET, "QUIC enabled, listening for UDP on ORPort");
+      is_stream = 1;
+    }
     if (is_stream)
       start_reading = 1;
 

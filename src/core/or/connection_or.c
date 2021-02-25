@@ -465,6 +465,7 @@ cell_pack(packed_cell_t *dst, const cell_t *src, int wide_circ_ids)
   }
   set_uint8(dest, src->command);
   memcpy(dest+1, src->payload, CELL_PAYLOAD_SIZE);
+  dst->circ_id = src->circ_id;
 }
 
 /** Unpack the network-order buffer <b>src</b> into a host-order

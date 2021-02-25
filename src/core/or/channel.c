@@ -1484,6 +1484,7 @@ write_packed_cell(channel_t *chan, packed_cell_t *cell)
 int
 channel_write_packed_cell(channel_t *chan, packed_cell_t *cell)
 {
+  log_info(LD_CHANNEL, "Writing packed cell, circuit_id: %u", cell->circ_id);
   int ret = -1;
 
   tor_assert(chan);

@@ -3114,6 +3114,7 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
                              cell_t *cell, cell_direction_t direction,
                              streamid_t fromstream)
 {
+  log_info(LD_CHANNEL, "circ_id: %u, stream: %hu, direction: %d", cell->circ_id, fromstream, direction);
   or_circuit_t *orcirc = NULL;
   cell_queue_t *queue;
   int streams_blocked;

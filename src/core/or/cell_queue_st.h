@@ -21,6 +21,8 @@ struct packed_cell_t {
   char body[CELL_MAX_NETWORK_SIZE]; /**< Cell as packed for network. */
   uint32_t inserted_timestamp; /**< Time (in timestamp units) when this cell
                                 * was inserted */
+
+  circid_t circ_id; /**< Circuit which received the cell. */
 };
 
 /** A queue of cells on a circuit, waiting to be added to the
