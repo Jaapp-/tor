@@ -1,3 +1,15 @@
+This fork of Tor implements QUIC support through Quiche.
+Quiche is forked and included as a git submodule, clone with --recursive.
+
+To install quiche as a shared library:
+    cd src/lib/quiche
+    cargo build --release
+    sudo cp target/release/libquiche.so /usr/local/bin
+    sudo ldconfig
+
+To enable QUIC, add the following line to torrc:
+    QUIC 1
+
 Tor protects your privacy on the internet by hiding the connection
 between your Internet address and the services you use. We believe Tor
 is reasonably secure, but please ensure you read the instructions and
