@@ -33,6 +33,7 @@
 #define ORCONN_EVENT_PRIVATE
 #include "core/or/channel.h"
 #include "core/or/channeltls.h"
+#include "core/or/channelquic.h"
 #include "core/or/circuitbuild.h"
 #include "core/or/circuitlist.h"
 #include "core/or/circuitstats.h"
@@ -721,6 +722,7 @@ connection_or_finished_connecting(or_connection_t *or_conn)
 {
   const int proxy_type = or_conn->proxy_type;
   connection_t *conn;
+  const int is_quic = get_options()->QUIC;
 
   tor_assert(or_conn);
   conn = TO_CONN(or_conn);
@@ -1674,6 +1676,46 @@ connection_tls_start_handshake,(or_connection_t *conn, int receiving))
 
   return 0;
 }
+
+//int connection_quic_start_handshake(struct or_connection_t *conn, int receiving) {
+//  channel_listener_t *chan_listener;
+//  channel_t *chan;
+//
+//  /* Incoming connections will need a new channel passed to the
+//   * channel_quic_listener */
+//  if (receiving) {
+//    /* It shouldn't already be set */
+//    tor_assert(!(conn->chan));
+//    chan_listener = channel_quic_get_listener();
+//    if (!chan_listener) {
+//      chan_listener = channel_quic_start_listener();
+//      command_setup_listener(chan_listener);
+//    }
+//    chan = channel_quic_handle_incoming(conn);
+//    channel_listener_queue_incoming(chan_listener, chan);
+//  }
+//
+//
+//  connection_or_change_state(conn, OR_CONN_STATE_TLS_HANDSHAKING);
+//  channel_quic_start_handshake(conn->quicchan);
+////  tor_assert(!conn->tls);
+////  conn->tls = tor_tls_new(conn->base_.s, receiving);
+////  if (!conn->tls) {
+////    log_warn(LD_BUG,"tor_tls_new failed. Closing.");
+////    return -1;
+////  }
+////  tor_tls_set_logged_address(conn->tls,
+////                             connection_describe_peer(TO_CONN(conn)));
+//
+//  connection_start_reading(TO_CONN(conn));
+//  log_debug(LD_HANDSHAKE,"starting TLS handshake on fd "TOR_SOCKET_T_FORMAT,
+//            conn->base_.s);
+//
+////  if (connection_tls_continue_handshake(conn) < 0)
+////    return -1;
+//
+//  return 0;
+//}
 
 /** Block all future attempts to renegotiate on 'conn' */
 void

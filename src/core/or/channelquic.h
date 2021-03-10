@@ -10,10 +10,15 @@
 struct channel_quic_t {
     /* Base channel_t struct */
     channel_t base_;
-    quiche_conn *conn;
+    quiche_conn *quiche_conn;
+    or_connection_t *or_conn;
     tor_addr_t *addr;
-    uint16_t *port;
-    uint8_t out[MAX_DATAGRAM_SIZE];
+    uint16_t port;
+    uint8_t outbuf[MAX_DATAGRAM_SIZE];
+    uint8_t inbuf[MAX_DATAGRAM_SIZE];
+    tor_socket_t sock;
+    struct event *read_event; /**< Libevent event structure. */
+    struct event *write_event; /**< Libevent event structure. */
 };
 
 
@@ -32,9 +37,9 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port,
                                 const char *id_digest,
                                 const struct ed25519_public_key_t *ed_id);
 
-channel_listener_t *channel_quic_get_listener(void);
-
-channel_listener_t *channel_quic_start_listener(void);
+//channel_listener_t *channel_quic_get_listener(void);
+//
+//channel_listener_t *channel_quic_start_listener(void);
 
 channel_t *channel_quic_handle_incoming(or_connection_t *orconn);
 
@@ -51,7 +56,19 @@ void channel_quic_handle_var_cell(var_cell_t *var_cell,
 
 void channel_quic_update_marks(or_connection_t *conn);
 
+
+//int channel_quic_handle_read(connection_t *conn);
+
+int channel_quic_on_incoming(tor_socket_t news, tor_addr_t *addr, uint16_t port);
+
 /* Cleanup at shutdown */
 void channel_quic_free_all(void);
+
+
+void channel_quic_read_callback(tor_socket_t fd, short event, void *_quicchan);
+
+void channel_quic_write_callback(tor_socket_t fd, short event, void *_quicchan);
+
+int quic_channel_start_listening(struct channel_quic_t *quicchan);
 
 #endif //TOR_CHANNELQUIC_H

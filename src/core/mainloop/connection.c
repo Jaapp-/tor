@@ -73,6 +73,7 @@
 #include "core/mainloop/netstatus.h"
 #include "core/or/channel.h"
 #include "core/or/channeltls.h"
+#include "core/or/channelquic.h"
 #include "core/or/circuitbuild.h"
 #include "core/or/circuitlist.h"
 #include "core/or/circuituse.h"
@@ -1465,7 +1466,6 @@ connection_listener_new(const struct sockaddr *listensockaddr,
       listensockaddr->sa_family == AF_INET6) {
     int is_stream = (type != CONN_TYPE_AP_DNS_LISTENER);
     if (type == CONN_TYPE_OR_LISTENER && options->QUIC) {
-      log_info(LD_NET, "QUIC enabled, listening for UDP on ORPort");
       is_stream = 1;
     }
     if (is_stream)
@@ -1903,6 +1903,7 @@ check_sockaddr_family_match(sa_family_t got, connection_t *listener)
 static int
 connection_handle_listener_read(connection_t *conn, int new_type)
 {
+  log_notice(LD_NET, "Handling listener read, type=%d, port=%d", new_type, conn->port);
   tor_socket_t news; /* the new socket */
   connection_t *newconn = 0;
   /* information about the remote peer when connecting to other routers */
@@ -2008,6 +2009,10 @@ connection_handle_listener_read(connection_t *conn, int new_type)
         tor_close_socket(news);
         return 0;
       }
+
+      if (options->QUIC) {
+          return channel_quic_on_incoming(news, &addr, port);
+      }
     }
 
     newconn = connection_new(new_type, conn->socket_family);
@@ -2087,7 +2092,6 @@ connection_init_accepted_conn(connection_t *conn,
   int rv;
 
   connection_start_reading(conn);
-
   switch (conn->type) {
     case CONN_TYPE_EXT_OR:
       /* Initiate Extended ORPort authentication. */
@@ -2158,6 +2162,7 @@ connection_connect_sockaddr,(connection_t *conn,
   tor_socket_t s;
   int inprogress = 0;
   const or_options_t *options = get_options();
+  const is_quic =  options->QUIC;
 
   tor_assert(conn);
   tor_assert(sa);
@@ -2179,10 +2184,11 @@ connection_connect_sockaddr,(connection_t *conn,
   }
 
   const int protocol_family = sa->sa_family;
-  const int proto = (sa->sa_family == AF_INET6 ||
+  int proto = (sa->sa_family == AF_INET6 ||
                      sa->sa_family == AF_INET) ? IPPROTO_TCP : 0;
 
-  s = tor_open_socket_nonblocking(protocol_family, SOCK_STREAM, proto);
+  if (is_quic) proto = IPPROTO_UDP;
+  s = tor_open_socket_nonblocking(protocol_family, is_quic ? SOCK_DGRAM : SOCK_STREAM, proto);
   if (! SOCKET_OK(s)) {
     /*
      * Early OOS handler calls; it matters if it's an exhaustion-related
@@ -3884,6 +3890,7 @@ connection_handle_read_impl(connection_t *conn)
   ssize_t max_to_read=-1, try_to_read;
   size_t before, n_read = 0;
   int socket_error = 0;
+  const or_options_t *options = get_options();
 
   if (conn->marked_for_close)
     return 0; /* do nothing */
@@ -3913,6 +3920,11 @@ connection_handle_read_impl(connection_t *conn)
       tor_fragile_assert();
       return 0;
   }
+//
+//  if (options->QUIC && conn->type == CONN_TYPE_OR) {
+//      // Bypass internal reading logic
+//      return channel_quic_handle_read(conn);
+//  }
 
  loop_again:
   try_to_read = max_to_read;
