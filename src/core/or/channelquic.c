@@ -364,7 +364,6 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
                                 const struct ed25519_public_key_t *ed_id) {
     log_notice(LD_CHANNEL, "QUIC: connect");
 
-
     channel_quic_t *quicchan = tor_malloc_zero(sizeof(*quicchan));
     channel_t *chan = &(quicchan->base_);
 
@@ -373,20 +372,21 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
     struct sockaddr *sock_addr;
     sock_addr = tor_malloc(sizeof(struct sockaddr_storage));
     socklen_t sock_len = tor_addr_to_sockaddr(addr, port, sock_addr, sizeof(struct sockaddr_storage));
+    log_notice(LD_CHANNEL, "QUIC: connecting to %s", tor_sockaddr_to_str(sock_addr));
 
     quicchan->sock = socket(addr->family, SOCK_DGRAM, 0);
     if (quicchan->sock < 0) {
-        perror("failed to create socket");
+        log_warn(LD_CHANNEL, "failed to create socket");
         return NULL;
     }
 
     if (fcntl(quicchan->sock, F_SETFL, O_NONBLOCK) != 0) {
-        perror("failed to make socket non-blocking");
+        log_warn(LD_CHANNEL, "failed to make socket non-blocking");
         return NULL;
     }
 
     if (connect(quicchan->sock, sock_addr, sock_len) < 0) {
-        perror("failed to connect socket");
+        log_warn(LD_CHANNEL, "failed to connect socket");
         return NULL;
     }
 
@@ -408,12 +408,18 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
     quicchan->port = port;
 
     quic_channel_start_listening(quicchan);
+    channel_quic_flush_egress(quicchan);
 
     return chan;
 }
 
 int channel_quic_on_incoming(tor_socket_t news, tor_addr_t *addr, uint16_t port) {
-    log_notice(LD_CHANNEL, "QUIC: incoming connection");
+    int type;
+    int length = sizeof(int);
+
+    getsockopt(news, SOL_SOCKET, SO_TYPE, &type, &length);
+    log_notice(LD_CHANNEL, "QUIC: incoming connection, socket is udp: %d", type == SOCK_DGRAM);
+
 
     channel_quic_t *quicchan = tor_malloc_zero(sizeof(*quicchan));
     channel_t *chan = &(quicchan->base_);
@@ -438,10 +444,10 @@ int channel_quic_on_incoming(tor_socket_t news, tor_addr_t *addr, uint16_t port)
 int quic_channel_start_listening(struct channel_quic_t *quicchan) {
     quicchan->read_event = tor_event_new(tor_libevent_get_base(),
                                          quicchan->sock, EV_READ | EV_PERSIST, channel_quic_read_callback, quicchan);
-    quicchan->write_event = tor_event_new(tor_libevent_get_base(),
-                                          quicchan->sock, EV_WRITE | EV_PERSIST, channel_quic_write_callback, quicchan);
+//    quicchan->write_event = tor_event_new(tor_libevent_get_base(),
+//                                          quicchan->sock, EV_WRITE | EV_PERSIST, channel_quic_write_callback, quicchan);
     event_add(quicchan->read_event, NULL);
-    event_add(quicchan->write_event, NULL);
+//    event_add(quicchan->write_event, NULL);
     return 0;
 }
 
@@ -452,18 +458,18 @@ int channel_quic_flush_egress(struct channel_quic_t *channel) {
         ssize_t written = quiche_conn_send(channel->quiche_conn, channel->outbuf, sizeof(channel->outbuf));
 
         if (written == QUICHE_ERR_DONE) {
-            fprintf(stderr, "done writing\n");
+            log_info(LD_CHANNEL, "QUIC: done writing");
             break;
         }
 
         if (written < 0) {
-            fprintf(stderr, "failed to create packet: %zd\n", written);
+            log_warn(LD_CHANNEL, "QUIC: failed to create packet: %zd", written);
             return 1;
         }
 
         ssize_t sent = send(channel->sock, channel->outbuf, written, 0);
         if (sent != written) {
-            perror("failed to send");
+            log_warn(LD_CHANNEL, "QUIC failed to send");
             return 1;
         }
 
@@ -475,7 +481,23 @@ int channel_quic_flush_egress(struct channel_quic_t *channel) {
 }
 
 void channel_quic_read_callback(int fd, short event, void *_quicchan) {
+    channel_quic_t *quicchan = _quicchan;
     log_notice(LD_CHANNEL, "QUIC: read callback");
+    while (1) {
+        ssize_t read_size = read(quicchan->sock, quicchan->inbuf, sizeof(quicchan->inbuf));
+        if (read_size < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                break;
+            }
+            log_warn(LD_CHANNEL, "QUIC: read failed, %d", errno);
+        }
+        log_info(LD_CHANNEL, "QUIC: read %zd bytes", read_size);
+
+        ssize_t quiche_read = quiche_conn_recv(quicchan->quiche_conn, quicchan->inbuf, read_size);
+        if (quiche_read < 0) {
+            log_warn(LD_CHANNEL, "QUIC: Failed to process packet");
+        }
+    }
 }
 
 void channel_quic_write_callback(int fd, short event, void *_quicchan) {

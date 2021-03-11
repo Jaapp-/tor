@@ -1466,19 +1466,21 @@ connection_listener_new(const struct sockaddr *listensockaddr,
       listensockaddr->sa_family == AF_INET6) {
     int is_stream = (type != CONN_TYPE_AP_DNS_LISTENER);
     if (type == CONN_TYPE_OR_LISTENER && options->QUIC) {
-      is_stream = 1;
+      is_stream = 0;
+      start_reading = 1;
     }
     if (is_stream)
       start_reading = 1;
 
     tor_addr_from_sockaddr(&addr, listensockaddr, &usePort);
-    log_notice(LD_NET, "Opening %s on %s",
-               conn_type_to_string(type), fmt_addrport(&addr, usePort));
+    log_notice(LD_NET, "QUIC: Opening %s on %s, is_stream=%d",
+               conn_type_to_string(type), fmt_addrport(&addr, usePort), is_stream);
 
     s = tor_open_socket_nonblocking(tor_addr_family(&addr),
       is_stream ? SOCK_STREAM : SOCK_DGRAM,
       is_stream ? IPPROTO_TCP: IPPROTO_UDP);
     if (!SOCKET_OK(s)) {
+        log_notice(LD_CHANNEL, "QUIC: error while opening listen socket");
       int e = tor_socket_errno(s);
       if (ERRNO_IS_RESOURCE_LIMIT(e)) {
         warn_too_many_conns();
@@ -1741,8 +1743,7 @@ connection_listener_new(const struct sockaddr *listensockaddr,
   conn->state = LISTENER_STATE_READY;
   if (start_reading) {
     connection_start_reading(conn);
-  } else {
-    tor_assert(type == CONN_TYPE_AP_DNS_LISTENER);
+  } else if (type == CONN_TYPE_AP_DNS_LISTENER) {
     dnsserv_configure_listener(conn);
   }
 
@@ -1903,7 +1904,7 @@ check_sockaddr_family_match(sa_family_t got, connection_t *listener)
 static int
 connection_handle_listener_read(connection_t *conn, int new_type)
 {
-  log_notice(LD_NET, "Handling listener read, type=%d, port=%d", new_type, conn->port);
+  log_notice(LD_NET, "QUIC: Handling listener read, type=%s, port=%d", conn_type_to_string(new_type), conn->port);
   tor_socket_t news; /* the new socket */
   connection_t *newconn = 0;
   /* information about the remote peer when connecting to other routers */
@@ -1960,6 +1961,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
     tor_close_socket(news);
     return 0;
   }
+  log_notice(LD_CHANNEL, "QUIC: accept socket ok");
 
   if (options->ConstrainedSockets)
     set_constrained_socket_buffers(news, (int)options->ConstrainedSockSize);
