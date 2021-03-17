@@ -6,20 +6,28 @@
 #define QUIC_CHAN_MAGIC 0x75cd0b9c
 #define LOCAL_CONN_ID_LEN 16
 #define MAX_DATAGRAM_SIZE 1350
+#define MAX_TOKEN_LEN                                                          \
+  sizeof("quiche") - 1 + sizeof(struct sockaddr_storage) +                     \
+      QUICHE_MAX_CONN_ID_LEN
+
 
 struct channel_quic_t {
-    /* Base channel_t struct */
+    HT_ENTRY(channel_quic_t) node;
+
+    // QUIC's connection id is the channel's primary key.
+    uint8_t *cid[LOCAL_CONN_ID_LEN];
     channel_t base_;
     quiche_conn *quiche_conn;
-    or_connection_t *or_conn;
+//    or_connection_t *or_conn;
     tor_addr_t *addr;
     uint16_t port;
     uint8_t outbuf[MAX_DATAGRAM_SIZE];
     uint8_t inbuf[MAX_DATAGRAM_SIZE];
-    tor_socket_t sock;
-    struct event *read_event; /**< Libevent event structure. */
-    struct event *write_event; /**< Libevent event structure. */
+//    tor_socket_t sock;
 };
+
+
+typedef HT_HEAD(channel_quic_ht, channel_quic_t) channel_quic_ht_t;
 
 
 #define BASE_CHAN_TO_QUIC(c) (channel_quic_from_base((c)))
@@ -41,8 +49,6 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port,
 //
 //channel_listener_t *channel_quic_start_listener(void);
 
-channel_t *channel_quic_handle_incoming(or_connection_t *orconn);
-
 
 /* Things for connection_or.c to call back into */
 void channel_quic_handle_cell(cell_t *cell, or_connection_t *conn);
@@ -59,7 +65,7 @@ void channel_quic_update_marks(or_connection_t *conn);
 
 //int channel_quic_handle_read(connection_t *conn);
 
-int channel_quic_on_incoming(tor_socket_t news, tor_addr_t *addr, uint16_t port);
+int channel_quic_on_incoming(tor_socket_t sock);
 
 /* Cleanup at shutdown */
 void channel_quic_free_all(void);
@@ -70,5 +76,21 @@ void channel_quic_read_callback(tor_socket_t fd, short event, void *_quicchan);
 void channel_quic_write_callback(tor_socket_t fd, short event, void *_quicchan);
 
 int quic_channel_start_listening(struct channel_quic_t *quicchan);
+
+int channel_quic_on_listener_initialized(connection_t *conn);
+
+void channel_quic_common_init(channel_quic_t *quicchan);
+
+quiche_config *create_quiche_config(void);
+
+uint8_t *fill_with_random_bytes(uint8_t *array, size_t array_len);
+
+int channel_quic_flush_egress(struct channel_quic_t *channel);
+
+int
+channel_quic_equal(const struct channel_quic_t *c1, const struct channel_quic_t *c2);
+
+unsigned
+channel_quic_hash(const struct channel_quic_t *d);
 
 #endif //TOR_CHANNELQUIC_H

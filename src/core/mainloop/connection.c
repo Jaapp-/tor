@@ -1747,6 +1747,10 @@ connection_listener_new(const struct sockaddr *listensockaddr,
     dnsserv_configure_listener(conn);
   }
 
+  if (type == CONN_TYPE_OR_LISTENER && options->QUIC) {
+    channel_quic_on_listener_initialized(conn);
+  }
+
   /*
    * Normal exit; call the OOS handler since connection count just changed;
    * the exhaustion flag will always be zero here though.
@@ -1917,6 +1921,12 @@ connection_handle_listener_read(connection_t *conn, int new_type)
   tor_assert((size_t)remotelen >= sizeof(struct sockaddr_in));
   memset(&addrbuf, 0, sizeof(addrbuf));
 
+  if (new_type == CONN_TYPE_OR) {
+    if (options->QUIC) {
+      return channel_quic_on_incoming(conn->s);
+    }
+  }
+
   news = tor_accept_socket_nonblocking(conn->s,remote,&remotelen);
   if (!SOCKET_OK(news)) { /* accept() error */
     int e = tor_socket_errno(conn->s);
@@ -2010,10 +2020,6 @@ connection_handle_listener_read(connection_t *conn, int new_type)
       if (dos_conn_addr_get_defense_type(&addr) == DOS_CONN_DEFENSE_CLOSE) {
         tor_close_socket(news);
         return 0;
-      }
-
-      if (options->QUIC) {
-          return channel_quic_on_incoming(news, &addr, port);
       }
     }
 
