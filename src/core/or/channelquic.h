@@ -15,12 +15,15 @@ struct channel_quic_t {
     HT_ENTRY(channel_quic_t) node;
 
     // QUIC's connection id is the channel's primary key.
-    uint8_t *cid[LOCAL_CONN_ID_LEN];
+    uint8_t *scid[LOCAL_CONN_ID_LEN];
+    uint8_t *dcid;
+    size_t dcid_len;
     channel_t base_;
     quiche_conn *quiche_conn;
 //    or_connection_t *or_conn;
-    tor_addr_t *addr;
-    uint16_t port;
+    struct sockaddr_in *addr;
+//    struct tor_addr_t *tor_addr;
+//    uint16_t port;
     uint8_t outbuf[MAX_DATAGRAM_SIZE];
     uint8_t inbuf[MAX_DATAGRAM_SIZE];
 //    tor_socket_t sock;
@@ -75,7 +78,7 @@ void channel_quic_read_callback(tor_socket_t fd, short event, void *_quicchan);
 
 void channel_quic_write_callback(tor_socket_t fd, short event, void *_quicchan);
 
-int quic_channel_start_listening(struct channel_quic_t *quicchan);
+channel_quic_t *channel_quic_create(struct sockaddr_in *peer_addr, uint8_t *scid, quiche_conn *conn);
 
 int channel_quic_on_listener_initialized(connection_t *conn);
 

@@ -1473,8 +1473,6 @@ connection_listener_new(const struct sockaddr *listensockaddr,
       start_reading = 1;
 
     tor_addr_from_sockaddr(&addr, listensockaddr, &usePort);
-    log_notice(LD_NET, "QUIC: Opening %s on %s, is_stream=%d",
-               conn_type_to_string(type), fmt_addrport(&addr, usePort), is_stream);
 
     s = tor_open_socket_nonblocking(tor_addr_family(&addr),
       is_stream ? SOCK_STREAM : SOCK_DGRAM,
@@ -1908,7 +1906,6 @@ check_sockaddr_family_match(sa_family_t got, connection_t *listener)
 static int
 connection_handle_listener_read(connection_t *conn, int new_type)
 {
-  log_notice(LD_NET, "QUIC: Handling listener read, type=%s, port=%d", conn_type_to_string(new_type), conn->port);
   tor_socket_t news; /* the new socket */
   connection_t *newconn = 0;
   /* information about the remote peer when connecting to other routers */
@@ -1971,7 +1968,6 @@ connection_handle_listener_read(connection_t *conn, int new_type)
     tor_close_socket(news);
     return 0;
   }
-  log_notice(LD_CHANNEL, "QUIC: accept socket ok");
 
   if (options->ConstrainedSockets)
     set_constrained_socket_buffers(news, (int)options->ConstrainedSockSize);

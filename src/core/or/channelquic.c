@@ -77,21 +77,22 @@ static int channel_quic_write_var_cell_method(channel_t *chan,
 
 static char *fmt_quic_id(uint8_t array[], size_t array_len);
 
+
 int quic_ht_is_initialized;
-tor_socket_t udp_socket;
+static tor_socket_t udp_socket;
 
 
 int
 channel_quic_equal(const struct channel_quic_t *c1, const struct channel_quic_t *c2)
 {
-  return memcmp(c1->cid, c2->cid, sizeof(c1->cid)) == 0;
+  return memcmp(c1->scid, c2->scid, sizeof(c1->scid)) == 0;
 }
 
 unsigned
 channel_quic_hash(const struct channel_quic_t *d)
 {
 
-  return (unsigned) siphash24g(d->cid, sizeof(d->cid));
+  return (unsigned) siphash24g(d->scid, sizeof(d->scid));
 }
 
 
@@ -104,7 +105,7 @@ HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_q
              0.6, tor_reallocarray, tor_free_);
 
 
-channel_quic_ht_t *quic_ht;
+static channel_quic_ht_t *quic_ht;
 
 
 static void quic_init_ht()
@@ -115,20 +116,42 @@ static void quic_init_ht()
 }
 
 
+channel_quic_t *
+channel_quic_create(struct sockaddr_in *peer_addr, uint8_t scid[LOCAL_CONN_ID_LEN], quiche_conn *conn)
+{
+  log_notice(LD_CHANNEL, "QUIC: Creating channel scid=%s", fmt_quic_id(scid, LOCAL_CONN_ID_LEN));
+  channel_quic_t *quicchan = tor_malloc_zero(sizeof(*quicchan));
+  channel_t *chan = &(quicchan->base_);
+  channel_quic_common_init(quicchan);
+  quicchan->addr = peer_addr;
+  memcpy(quicchan->scid, scid, LOCAL_CONN_ID_LEN);
+  quicchan->quiche_conn = conn;
+
+  tor_addr_t tor_addr;
+  uint16_t port;
+  tor_addr_from_sockaddr(&tor_addr, (struct sockaddr *) quicchan->addr, &port);
+  chan->is_local = is_local_to_resolve_addr(&tor_addr);
+
+  channel_mark_incoming(chan);
+
+  channel_register(chan);
+
+  channel_quic_flush_egress(quicchan);
+
+  quic_init_ht();
+  HT_REPLACE(channel_quic_ht, quic_ht, quicchan);
+  log_notice(LD_CHANNEL, "QUIC: Inserted scid=%s into HT", fmt_quic_id(scid, LOCAL_CONN_ID_LEN));
+  return quicchan;
+}
+
+
 channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const char *id_digest,
                                 const struct ed25519_public_key_t *ed_id)
 {
-  log_notice(LD_CHANNEL, "QUIC: connect");
-
-  channel_quic_t *quicchan = tor_malloc_zero(sizeof(*quicchan));
-  channel_t *chan = &(quicchan->base_);
-
-  channel_quic_common_init(quicchan);
-
-  struct sockaddr *sock_addr;
+  struct sockaddr_in *sock_addr;
   sock_addr = tor_malloc(sizeof(struct sockaddr_storage));
-  socklen_t sock_len = tor_addr_to_sockaddr(addr, port, sock_addr, sizeof(struct sockaddr_storage));
-  log_notice(LD_CHANNEL, "QUIC: connecting to %s", tor_sockaddr_to_str(sock_addr));
+  tor_addr_to_sockaddr(addr, port, (struct sockaddr *) sock_addr, sizeof(struct sockaddr_storage));
+  log_notice(LD_CHANNEL, "QUIC: connecting to %s", tor_sockaddr_to_str((struct sockaddr *) sock_addr));
 
   quiche_config *config = create_quiche_config();
   uint8_t scid[LOCAL_CONN_ID_LEN];
@@ -143,24 +166,23 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
     fprintf(stderr, "QUIC: failed to create connection\n");
     return NULL;
   }
-  log_info(LD_CHANNEL, "QUIC: Creating connection, scid=%s", fmt_quic_id(scid, LOCAL_CONN_ID_LEN));
-  quicchan->quiche_conn = conn;
-  quicchan->addr = addr;
-  quicchan->port = port;
-  memcpy(quicchan->cid, scid, LOCAL_CONN_ID_LEN);
+  channel_quic_t *quicchan = channel_quic_create(sock_addr, scid, conn);
+//  quicchan->quiche_conn = conn;
+//  quicchan->addr = sock_addr;
+//  memcpy(quicchan->cid, scid, LOCAL_CONN_ID_LEN);
 
-  quic_channel_start_listening(quicchan);
-  channel_quic_flush_egress(quicchan);
-
-  return chan;
+//  quic_channel_start_listening(quicchan);
+//  channel_quic_flush_egress(quicchan);
+  return QUIC_CHAN_TO_BASE(quicchan);
 }
+
 
 int channel_quic_on_incoming(tor_socket_t sock)
 {
   static uint8_t buf[65535];
-  log_notice(LD_CHANNEL, "QUIC: incoming data");
+  log_notice(LD_CHANNEL, "QUIC: incoming data, %s", quiche_version());
 
-  struct sockaddr_storage peer_addr;
+  struct sockaddr_in peer_addr;
   socklen_t peer_addr_len = sizeof(peer_addr);
   memset(&peer_addr, 0, peer_addr_len);
 
@@ -193,41 +215,29 @@ int channel_quic_on_incoming(tor_socket_t sock)
     log_warn(LD_CHANNEL, "QUIC: Quiche header info error");
     return -1;
   }
-  log_notice(LD_CHANNEL, "QUIC: Received initial data");
+  if (!quiche_version_is_supported(version)) {
+    log_warn(LD_CHANNEL, "QUIC: Version unsupported");
+    return -1;
+  }
   log_info(LD_CHANNEL, "QUIC: received conn scid=%s, dcid=%s", fmt_quic_id(scid, scid_len),
            fmt_quic_id(dcid, dcid_len));
 
   quic_init_ht();
 
   struct channel_quic_t channel_key;
-  memcpy(channel_key.cid, dcid, dcid_len);
+  memcpy(channel_key.scid, scid, scid_len);
   struct channel_quic_t *found = HT_FIND(channel_quic_ht, quic_ht, &channel_key);
   if (found) {
     log_info(LD_CHANNEL, "QUIC: Found channel");
   } else {
     log_info(LD_CHANNEL, "QUIC: Didn't find channel");
-
-    channel_quic_t *quicchan = tor_malloc_zero(sizeof(*quicchan));
-    channel_t *chan = &(quicchan->base_);
-    tor_addr_t addr;
-    uint16_t port;
-    tor_addr_from_sockaddr(&addr, (struct sockaddr *) &peer_addr, &port);
-    quicchan->addr = &addr;
-    quicchan->port = port;
-    memcpy(quicchan->cid, dcid, dcid_len);
-
-    channel_quic_common_init(quicchan);
-
-    chan->is_local = is_local_to_resolve_addr(quicchan->addr);
-
-    channel_mark_incoming(chan);
-
-    channel_register(chan);
-
-    quic_channel_start_listening(quicchan);
-    channel_quic_flush_egress(quicchan);
-    HT_INSERT(channel_quic_ht, quic_ht, quicchan);
-    log_notice(LD_CHANNEL, "QUIC: Inserted dcid=%s into HT", fmt_quic_id(dcid, dcid_len));
+    quiche_config *config = create_quiche_config();
+    quiche_conn *conn = quiche_accept(scid, scid_len, odcid, odcid_len, config);
+    int recv = quiche_conn_recv(conn, buf, read);
+    if (recv < 0) {
+      log_warn(LD_CHANNEL, "QUIC: receive error, %d", recv);
+    }
+    channel_quic_create(&peer_addr, scid, conn);
   }
   return 0;
 }
@@ -235,13 +245,13 @@ int channel_quic_on_incoming(tor_socket_t sock)
 
 static void debug_log(const char *line, void *argp)
 {
-  log_debug(LD_CHANNEL, "%s", line);
+  log_info(LD_CHANNEL, "%s", line);
 }
 
 quiche_config *create_quiche_config()
 {
   quiche_enable_debug_logging(debug_log, NULL);
-  quiche_config *config = quiche_config_new(0xbabababa);
+  quiche_config *config = quiche_config_new(0xff00001d);
   if (config == NULL) {
     fprintf(stderr, "failed to create config\n");
     return NULL;
@@ -376,7 +386,7 @@ channel_quic_describe_peer_method(const channel_t *chan)
   tor_assert(quicchan);
 
 
-  if (*quicchan->cid) {
+  if (*quicchan->scid) {
     return "<QUIC channel>";
   } else {
     return "(No connection)";
@@ -414,11 +424,14 @@ int channel_quic_is_canonical_method(channel_t *chan)
 
 int channel_quic_matches_extend_info_method(channel_t *chan, extend_info_t *extend_info)
 {
-  log_notice(LD_CHANNEL, "QUIC: matches extend info requestsed");
+  log_notice(LD_CHANNEL, "QUIC: matches extend info requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_addr_t tor_addr;
+  uint16_t port;
+  tor_addr_from_sockaddr(&tor_addr, (const struct sockaddr *) quicchan->addr, &port);
   return extend_info_has_orport(extend_info,
-                                quicchan->addr,
-                                quicchan->port);
+                                &tor_addr,
+                                quicchan->addr->sin_port);
 }
 
 int channel_quic_matches_target_method(channel_t *chan, const tor_addr_t *target)
@@ -532,9 +545,26 @@ void print_array_hex(uint8_t array[], size_t array_len)
   printf("\n");
 }
 
+static void channel_quic_read_cb(tor_socket_t s, short event, void *arg)
+{
+  channel_quic_on_incoming(s);
+}
+
+static void channel_quic_ensure_socket()
+{
+  if (udp_socket) return;
+  udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+  evutil_make_socket_nonblocking(udp_socket);
+
+  struct event *read_event = tor_event_new(tor_libevent_get_base(),
+                                           udp_socket, EV_READ | EV_PERSIST, channel_quic_read_cb, NULL);
+  event_add(read_event, NULL);
+}
+
 
 int channel_quic_flush_egress(struct channel_quic_t *channel)
 {
+  channel_quic_ensure_socket();
   log_notice(LD_CHANNEL, "QUIC: flushing");
   while (1) {
     ssize_t written = quiche_conn_send(channel->quiche_conn, channel->outbuf, sizeof(channel->outbuf));
@@ -549,13 +579,17 @@ int channel_quic_flush_egress(struct channel_quic_t *channel)
     }
 
 
-    ssize_t sent = sendto(udp_socket, channel->outbuf, written, 0, channel->addr, sizeof(channel->addr));
+    ssize_t sent = sendto(udp_socket, channel->outbuf, written, 0, (const struct sockaddr *) channel->addr,
+                          sizeof(struct sockaddr_storage));
     if (sent != written) {
-      log_warn(LD_CHANNEL, "QUIC failed to send");
+      log_warn(LD_CHANNEL, "QUIC failed to send %zd, addr: %s, size: %zd, err: %d, socket: %d", sent,
+               tor_sockaddr_to_str(
+                   (const struct sockaddr *) channel->addr), written, errno, udp_socket);
       return 1;
     }
 
-    log_notice(LD_CHANNEL, "QUIC: sent %zd bytes", sent);
+    log_notice(LD_CHANNEL, "QUIC: sent %zd bytes to %s", sent, tor_sockaddr_to_str(
+        (const struct sockaddr *) channel->addr));
   }
   return 0;
 //    double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
@@ -565,7 +599,7 @@ int channel_quic_flush_egress(struct channel_quic_t *channel)
 
 int channel_quic_on_listener_initialized(connection_t *conn)
 {
-  log_notice(LD_CHANNEL, "QUIC listener initialized, socket=%d", conn->s);
+  log_notice(LD_CHANNEL, "QUIC: listener initialized, socket: %d", conn->s);
   udp_socket = conn->s;
   return 0;
 }
