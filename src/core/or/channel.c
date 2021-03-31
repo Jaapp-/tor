@@ -2323,7 +2323,7 @@ channel_connect(const tor_addr_t *addr, uint16_t port,
                 const ed25519_public_key_t *ed_id)
 {
   int quic = get_options()->QUIC;
-  log_info(LD_CHANNEL, "channel_connect called, quic=%d", quic);
+  log_info(LD_CHANNEL, "QUIC: channel_connect called, quic=%d", quic);
   if (quic) {
     return channel_quic_connect(addr, port, id_digest, ed_id);
   } else {

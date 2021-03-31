@@ -4,7 +4,7 @@
 #include "lib/quiche/include/quiche.h"
 
 #define QUIC_CHAN_MAGIC 0x75cd0b9c
-#define LOCAL_CONN_ID_LEN 16
+#define CONN_ID_LEN 16
 #define MAX_DATAGRAM_SIZE 1350
 #define MAX_TOKEN_LEN                                                          \
   sizeof("quiche") - 1 + sizeof(struct sockaddr_storage) +                     \
@@ -14,23 +14,16 @@
 struct channel_quic_t {
     HT_ENTRY(channel_quic_t) node;
 
-    // QUIC's connection id is the channel's primary key.
-    uint8_t *scid[LOCAL_CONN_ID_LEN];
-    uint8_t *dcid;
-    size_t dcid_len;
+    uint8_t *cid[CONN_ID_LEN];
     channel_t base_;
     quiche_conn *quiche_conn;
-//    or_connection_t *or_conn;
     struct sockaddr_in *addr;
-//    struct tor_addr_t *tor_addr;
-//    uint16_t port;
     uint8_t outbuf[MAX_DATAGRAM_SIZE];
     uint8_t inbuf[MAX_DATAGRAM_SIZE];
-//    tor_socket_t sock;
 };
 
 
-typedef HT_HEAD(channel_quic_ht, channel_quic_t) channel_quic_ht_t;
+//typedef HT_HEAD(channel_quic_ht, channel_quic_t) channel_quic_ht_t;
 
 
 #define BASE_CHAN_TO_QUIC(c) (channel_quic_from_base((c)))
@@ -84,7 +77,7 @@ int channel_quic_on_listener_initialized(connection_t *conn);
 
 void channel_quic_common_init(channel_quic_t *quicchan);
 
-quiche_config *create_quiche_config(void);
+quiche_config *create_quiche_config(bool is_client);
 
 uint8_t *fill_with_random_bytes(uint8_t *array, size_t array_len);
 

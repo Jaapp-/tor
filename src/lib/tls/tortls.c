@@ -29,6 +29,8 @@
 #endif
 
 #include <time.h>
+#include <stdio.h>
+#include <openssl/pem.h>
 
 /** Global TLS contexts. We keep them here because nobody else needs
  * to touch them.
@@ -271,6 +273,13 @@ tor_tls_context_init_one(tor_tls_context_t **ppcontext,
       /* This is safe even if there are open connections: we reference-
        * count tor_tls_context_t objects. */
       tor_tls_context_decref(old_ctx);
+    }
+    if (!is_client) {
+      log_notice(LD_CRYPTO, "QUIC: writing link certs to files");
+      FILE *my_cert_desc = fopen("keys/link_cert.pem", "wb");
+      PEM_write_X509(my_cert_desc, new_ctx->my_link_cert->cert);
+      fclose(my_cert_desc);
+      crypto_pk_write_private_key_to_filename(new_ctx->link_key, "keys/link_key.pem");
     }
   }
 
