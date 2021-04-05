@@ -75,6 +75,21 @@ static int channel_quic_write_var_cell_method(channel_t *chan,
 
 static char *fmt_quic_id(uint8_t array[], size_t array_len);
 
+static void mint_token(const uint8_t *dcid, size_t dcid_len,
+                       struct sockaddr_storage *addr, socklen_t addr_len,
+                       uint8_t *token, size_t *token_len);
+
+
+static bool validate_token(const uint8_t *token, size_t token_len,
+                           struct sockaddr_storage *addr, socklen_t addr_len,
+                           uint8_t *odcid, size_t *odcid_len);
+
+static void stateless_retry(const uint8_t *scid, size_t scid_len, const uint8_t *dcid,
+                            size_t dcid_len, uint8_t *token, size_t token_len,
+                            uint32_t version, struct sockaddr_storage *peer_addr,
+                            socklen_t peer_addr_len);
+
+static void channel_quic_ensure_socket();
 
 static tor_socket_t udp_socket;
 
@@ -102,7 +117,7 @@ HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_q
 
 
 channel_quic_t *
-channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], quiche_conn *conn) {
+channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], quiche_conn *conn, bool is_outgoing) {
   log_debug(LD_CHANNEL, "QUIC: Creating channel cid=%s, addr=%s", fmt_quic_id(cid, CONN_ID_LEN),
             tor_sockaddr_to_str(
                 (const struct sockaddr *) peer_addr));
@@ -117,7 +132,11 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   uint16_t port;
   tor_addr_from_sockaddr(&tor_addr, (struct sockaddr *) quicchan->addr, &port);
   chan->is_local = is_local_to_resolve_addr(&tor_addr);
-  channel_mark_incoming(chan);
+  if (is_outgoing) {
+    channel_mark_outgoing(chan);
+  } else {
+    channel_mark_incoming(chan);
+  }
   channel_register(chan);
 
   channel_quic_flush_egress(quicchan);
@@ -143,17 +162,26 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
   char host[TOR_ADDR_BUF_LEN];
   tor_addr_to_str(host, addr, sizeof(host), 0);
 
-  quiche_conn *conn = quiche_connect(host, (const uint8_t *) scid,
-                                     sizeof(scid), config);
+  quiche_conn *conn = quiche_connect(host, scid, sizeof(scid), config);
   if (conn == NULL) {
     fprintf(stderr, "QUIC: failed to create connection\n");
     return NULL;
   }
-  channel_quic_t *quicchan = channel_quic_create(sock_addr, scid, conn);
+  channel_quic_t *quicchan = channel_quic_create(sock_addr, scid, conn, true);
   return QUIC_CHAN_TO_BASE(quicchan);
 }
 
 
+/**
+ * Called on incoming data on the UDP listener socket.
+ *
+ * Extract the connection id from QUIC headers.
+ * Look up the corresponding channel, or create a new one if none found.
+ *
+ *
+ * @param sock
+ * @return
+ */
 int channel_quic_on_incoming(tor_socket_t sock) {
   static uint8_t buf[65535];
   log_debug(LD_CHANNEL, "QUIC: incoming data, %s", quiche_version());
@@ -190,24 +218,40 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     log_warn(LD_CHANNEL, "QUIC: Quiche header info error");
     return -1;
   }
-  if (!quiche_version_is_supported(version)) {
-    log_warn(LD_CHANNEL, "QUIC: Version unsupported, version=%d", version);
-    return -1;
-  }
-
   struct channel_quic_t channel_key;
   memcpy(channel_key.cid, dcid, dcid_len);
-  struct channel_quic_t *found = HT_FIND(channel_quic_ht, &quic_ht, &channel_key);
-  if (found) {
-    int recv = quiche_conn_recv(found->quiche_conn, buf, read);
+  struct channel_quic_t *quicchan = HT_FIND(channel_quic_ht, &quic_ht, &channel_key);
+
+  if (quicchan) {
+    int recv = quiche_conn_recv(quicchan->quiche_conn, buf, read);
     if (recv < 0) {
       log_warn(LD_CHANNEL, "QUIC: Receive error on existing channel, recv=%d", recv);
     }
-    log_notice(LD_CHANNEL, "QUIC: rx existing recv=%db, cid=%s, addr=%s", recv, fmt_quic_id(dcid, dcid_len),
+    int established = quiche_conn_is_established(quicchan->quiche_conn);
+    if (established && QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
+      log_info(LD_CHANNEL, "QUIC: Transition chan to openeing, state=%d", QUIC_CHAN_TO_BASE(quicchan)->state);
+      channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
+    }
+    log_notice(LD_CHANNEL, "QUIC: rx existing recv=%db, cid=%s, addr=%s, established=%d", recv,
+               fmt_quic_id(dcid, dcid_len),
                tor_sockaddr_to_str(
-                   (const struct sockaddr *) &peer_addr));
-    channel_quic_flush_egress(found);
+                   (const struct sockaddr *) &peer_addr), established);
+    channel_quic_flush_egress(quicchan);
   } else {
+    if (!quiche_version_is_supported(version)) {
+      log_warn(LD_CHANNEL, "QUIC: Version unsupported, version=%d", version);
+      return -1;
+    }
+    if (token_len == 0) {
+      stateless_retry(scid, scid_len, dcid, dcid_len, token, token_len,
+                      version, (struct sockaddr_storage *) &peer_addr, peer_addr_len);
+      return 0;
+    }
+    if (!validate_token(token, token_len, (struct sockaddr_storage *) &peer_addr, peer_addr_len, odcid, &odcid_len)) {
+      log_warn(LD_CHANNEL, "QUIC: Token validation failed");
+      return -1;
+    }
+
     quiche_config *config = create_quiche_config(false);
     quiche_conn *conn = quiche_accept(dcid, dcid_len, odcid, odcid_len, config);
     int recv = quiche_conn_recv(conn, buf, read);
@@ -217,9 +261,46 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     log_notice(LD_CHANNEL, "QUIC: rx new recv=%db, cid=%s, addr=%s", recv, fmt_quic_id(dcid, dcid_len),
                tor_sockaddr_to_str(
                    (const struct sockaddr *) &peer_addr));
-    channel_quic_create(&peer_addr, dcid, conn);
+    channel_quic_create(&peer_addr, dcid, conn, false);
   }
   return 0;
+}
+
+
+static void stateless_retry(const uint8_t *scid, size_t scid_len, const uint8_t *dcid,
+                            size_t dcid_len, uint8_t *token, size_t token_len,
+                            uint32_t version, struct sockaddr_storage *peer_addr,
+                            socklen_t peer_addr_len) {
+  static uint8_t out[MAX_DATAGRAM_SIZE];
+  log_info(LD_CHANNEL, "QUIC: performing Stateless retry");
+
+  mint_token(dcid, dcid_len, peer_addr, peer_addr_len, token, &token_len);
+
+  uint8_t new_cid[CONN_ID_LEN];
+  if (fill_with_random_bytes(new_cid, CONN_ID_LEN) == NULL) {
+    log_warn(LD_CHANNEL, "QUIC: Created cid for retry packet failed");
+    return;
+  }
+
+  ssize_t written =
+      quiche_retry(scid, scid_len, dcid, dcid_len, new_cid, CONN_ID_LEN,
+                   token, token_len, version, out, sizeof(out));
+
+  if (written < 0) {
+    log_warn(LD_CHANNEL, "QUIC: failed to create retry packet: %zd", written);
+    return;
+  }
+
+  channel_quic_ensure_socket();
+  log_info(LD_CHANNEL, "QUIC: Sending %zd bytes to %s over %d", written, tor_sockaddr_to_str(
+      (const struct sockaddr *) peer_addr), udp_socket);
+  ssize_t sent = sendto(udp_socket, out, written, 0,
+                        (struct sockaddr *) peer_addr, peer_addr_len);
+  if (sent != written) {
+    log_warn(LD_CHANNEL, "QUIC: failed to send retry packet, rv=%zd, errno=%d", sent, errno);
+    return;
+  }
+  log_info(LD_CHANNEL, "QUIC: Sent retry packet, sent=%zdb", sent);
 }
 
 
@@ -229,7 +310,7 @@ static void debug_log(const char *line, void *argp) {
 
 quiche_config *create_quiche_config(bool is_client) {
   quiche_enable_debug_logging(debug_log, NULL);
-  quiche_config *config = quiche_config_new(0xff00001d);
+  quiche_config *config = quiche_config_new(QUICHE_PROTOCOL_VERSION);
   if (config == NULL) {
     log_info(LD_CHANNEL, "QUIC: failed to create config");
     return NULL;
@@ -248,7 +329,7 @@ quiche_config *create_quiche_config(bool is_client) {
   quiche_config_set_disable_active_migration(config, true);
 
   if (!is_client) {
-    log_info(LD_CHANNEL, "QUIC: loading certs");
+    log_debug(LD_CHANNEL, "QUIC: loading certs");
     int rv = quiche_config_load_cert_chain_from_pem_file(config, "keys/link_cert.pem");
     if (rv < 0) {
       log_warn(LD_CHANNEL, "QUIC: Loading cert failed");
@@ -524,16 +605,6 @@ static void channel_quic_ensure_socket() {
     log_warn(LD_CHANNEL, "QUIC: UDP socket bind failed");
   }
 
-//  struct sockaddr_in test_addr;
-//  memset(&test_addr, 0, sizeof(test_addr));
-//  test_addr.sin_family = AF_INET;
-//  test_addr.sin_port = htons(8080);
-//  test_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-//  char message[5] = "Heya";
-//  int srv = sendto(udp_socket, message, sizeof(message), 0, (const struct sockaddr *) &test_addr, sizeof(test_addr));
-//  log_info(LD_CHANNEL, "QUIC: sent on udp sock: %d", srv);
-//
-
   socklen_t socklen;
   int rt = getsockname(udp_socket, (struct sockaddr *) &listen_addr, &socklen);
   if (rt < 0) {
@@ -591,7 +662,47 @@ int channel_quic_on_listener_initialized(connection_t *conn) {
     log_debug(LD_CHANNEL, "QUIC: Not using listener of family %s", fmt_af_family(conn->socket_family));
     return 0;
   }
-  log_debug(LD_CHANNEL, "QUIC: listener initialized, socket: %d", conn->s);
+  log_info(LD_CHANNEL, "QUIC: listener initialized, socket: %d", conn->s);
   udp_socket = conn->s;
   return 0;
+}
+
+
+static bool validate_token(const uint8_t *token, size_t token_len,
+                           struct sockaddr_storage *addr, socklen_t addr_len,
+                           uint8_t *odcid, size_t *odcid_len) {
+
+  if ((token_len < sizeof("quiche") - 1) ||
+      memcmp(token, "quiche", sizeof("quiche") - 1)) {
+    return false;
+  }
+
+  token += sizeof("quiche") - 1;
+  token_len -= sizeof("quiche") - 1;
+
+  if ((token_len < addr_len) || memcmp(token, addr, addr_len)) {
+    return false;
+  }
+
+  token += addr_len;
+  token_len -= addr_len;
+
+  if (*odcid_len < token_len) {
+    return false;
+  }
+
+  memcpy(odcid, token, token_len);
+  *odcid_len = token_len;
+
+  return true;
+}
+
+static void mint_token(const uint8_t *dcid, size_t dcid_len,
+                       struct sockaddr_storage *addr, socklen_t addr_len,
+                       uint8_t *token, size_t *token_len) {
+  memcpy(token, "quiche", sizeof("quiche") - 1);
+  memcpy(token + sizeof("quiche") - 1, addr, addr_len);
+  memcpy(token + sizeof("quiche") - 1 + addr_len, dcid, dcid_len);
+
+  *token_len = sizeof("quiche") - 1 + addr_len + dcid_len;
 }

@@ -71,7 +71,7 @@ void channel_quic_read_callback(tor_socket_t fd, short event, void *_quicchan);
 
 void channel_quic_write_callback(tor_socket_t fd, short event, void *_quicchan);
 
-channel_quic_t *channel_quic_create(struct sockaddr_in *peer_addr, uint8_t *scid, quiche_conn *conn);
+channel_quic_t *channel_quic_create(struct sockaddr_in *peer_addr, uint8_t *scid, quiche_conn *conn, bool is_outgoing);
 
 int channel_quic_on_listener_initialized(connection_t *conn);
 
