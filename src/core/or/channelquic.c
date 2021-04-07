@@ -32,6 +32,7 @@
 #include "core/or/cell_queue_st.h"
 #include "core/or/connection_or.h"
 #include "connection_st.h"
+#include "scheduler.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
@@ -231,6 +232,7 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     if (established && QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
       log_info(LD_CHANNEL, "QUIC: Transition chan to openeing, state=%d", QUIC_CHAN_TO_BASE(quicchan)->state);
       channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
+      scheduler_channel_wants_writes(QUIC_CHAN_TO_BASE(quicchan));
     }
     log_notice(LD_CHANNEL, "QUIC: rx existing recv=%db, cid=%s, addr=%s, established=%d", recv,
                fmt_quic_id(dcid, dcid_len),

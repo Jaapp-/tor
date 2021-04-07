@@ -2166,7 +2166,7 @@ connection_connect_sockaddr,(connection_t *conn,
   tor_socket_t s;
   int inprogress = 0;
   const or_options_t *options = get_options();
-  const is_quic =  options->QUIC;
+  const int is_quic =  options->QUIC && conn->type == CONN_TYPE_OR;
 
   tor_assert(conn);
   tor_assert(sa);
