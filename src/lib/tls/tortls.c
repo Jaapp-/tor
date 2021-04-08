@@ -274,12 +274,16 @@ tor_tls_context_init_one(tor_tls_context_t **ppcontext,
        * count tor_tls_context_t objects. */
       tor_tls_context_decref(old_ctx);
     }
-    if (!is_client) {
+    if (!is_client && new_ctx->my_link_cert->cert && new_ctx->link_key) {
       log_notice(LD_CRYPTO, "QUIC: writing link certs to files");
       FILE *my_cert_desc = fopen("keys/link_cert.pem", "wb");
-      PEM_write_X509(my_cert_desc, new_ctx->my_link_cert->cert);
-      fclose(my_cert_desc);
-      crypto_pk_write_private_key_to_filename(new_ctx->link_key, "keys/link_key.pem");
+      if (!my_cert_desc) {
+        log_warn(LD_CHANNEL, "QUIC: can't open keys/link_cert.pem, skipping writing PEM certs...");
+      } else {
+        PEM_write_X509(my_cert_desc, new_ctx->my_link_cert->cert);
+        fclose(my_cert_desc);
+        crypto_pk_write_private_key_to_filename(new_ctx->link_key, "keys/link_key.pem");
+      }
     }
   }
 

@@ -1731,6 +1731,7 @@ channel_listener_change_state(channel_listener_t *chan_l,
 MOCK_IMPL(ssize_t,
 channel_flush_some_cells, (channel_t *chan, ssize_t num_cells))
 {
+  log_info(LD_CHANNEL, "QUIC: flush_some_cells");
   unsigned int unlimited = 0;
   ssize_t flushed = 0;
   int clamped_num_cells;
@@ -1877,7 +1878,6 @@ channel_do_open_actions(channel_t *chan)
     if (channel_is_client(chan)) {
       if (channel_get_addr_if_possible(chan, &remote_addr)) {
         char *transport_name = NULL;
-        channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
         if (chan->get_transport_name(chan, &transport_name) < 0)
           transport_name = NULL;
 
@@ -1885,9 +1885,12 @@ channel_do_open_actions(channel_t *chan)
                                &remote_addr, transport_name,
                                now);
         tor_free(transport_name);
-        /* Notify the DoS subsystem of a new client. */
-        if (tlschan && tlschan->conn) {
-          dos_new_client_conn(tlschan->conn, transport_name);
+        if (!get_options()->QUIC) {
+          channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
+          /* Notify the DoS subsystem of a new client. */
+          if (tlschan && tlschan->conn) {
+            dos_new_client_conn(tlschan->conn, transport_name);
+          }
         }
       }
       /* Otherwise the underlying transport can't tell us this, so skip it */
@@ -2416,6 +2419,7 @@ channel_get_for_extend,(const char *rsa_id_digest,
                         const char **msg_out,
                         int *launch_out))
 {
+  log_info(LD_CHANNEL, "QUIC: find open channel");
   channel_t *chan, *best = NULL;
   int n_inprogress_goodaddr = 0, n_old = 0;
   int n_noncanonical = 0;
@@ -3388,22 +3392,33 @@ channel_rsa_id_group_set_badness(struct channel_list_t *lst, int force)
 {
   /*XXXX This function should really be about channels. 15056 */
   channel_t *chan = TOR_LIST_FIRST(lst);
+  int is_quic = get_options()->QUIC;
 
   if (!chan)
     return;
 
   /* if there is only one channel, don't bother looping */
   if (PREDICT_LIKELY(!TOR_LIST_NEXT(chan, next_with_same_id))) {
-    connection_or_single_set_badness_(
-            time(NULL), BASE_CHAN_TO_TLS(chan)->conn, force);
+    if (is_quic) {
+      log_info(LD_CHANNEL, "QUIC: skipping set_badness");
+    } else {
+      connection_or_single_set_badness_(
+          time(NULL), BASE_CHAN_TO_TLS(chan)->conn, force);
+    }
     return;
   }
 
   smartlist_t *channels = smartlist_new();
 
   TOR_LIST_FOREACH(chan, lst, next_with_same_id) {
-    if (BASE_CHAN_TO_TLS(chan)->conn) {
-      smartlist_add(channels, chan);
+    if (is_quic) {
+      if (BASE_CHAN_TO_QUIC(chan)->quiche_conn) {
+        smartlist_add(channels, chan);
+      }
+    } else {
+      if (BASE_CHAN_TO_TLS(chan)->conn) {
+        smartlist_add(channels, chan);
+      }
     }
   }
 
@@ -3425,7 +3440,11 @@ channel_rsa_id_group_set_badness(struct channel_list_t *lst, int force)
         common_ed25519_identity = &channel->ed25519_identity;
     }
 
-    smartlist_add(or_conns, BASE_CHAN_TO_TLS(channel)->conn);
+    if (!is_quic) {
+      smartlist_add(or_conns, BASE_CHAN_TO_TLS(channel)->conn);
+    } else {
+      log_info(LD_CHANNEL, "QUIC: not adding or_conn...");
+    }
   } SMARTLIST_FOREACH_END(channel);
 
   connection_or_group_set_badness_(or_conns, force);

@@ -21,6 +21,7 @@
 #include "lib/math/fp.h"
 
 #include "core/or/or_connection_st.h"
+#include "channelquic.h"
 
 #ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
@@ -202,8 +203,14 @@ update_socket_info_impl, (socket_table_ent_t *ent))
   int64_t tcp_space, extra_space;
   tor_assert(ent);
   tor_assert(ent->chan);
-  const tor_socket_t sock =
-    TO_CONN(CONST_BASE_CHAN_TO_TLS(ent->chan)->conn)->s;
+  tor_socket_t sock;
+  if (get_options()->QUIC) {
+    log_info(LD_CHANNEL, "QUIC: disabling KIST, we don't support UDP currently");
+    kist_no_kernel_support = 1;
+    goto fallback;
+  } else {
+    sock = TO_CONN(CONST_BASE_CHAN_TO_TLS(ent->chan)->conn)->s;
+  }
   struct tcp_info tcp;
   socklen_t tcp_info_len = sizeof(tcp);
 
@@ -585,6 +592,7 @@ kist_scheduler_schedule(void)
 static void
 kist_scheduler_run(void)
 {
+  log_info(LD_CHANNEL, "QUIC: kist_scheduler run");
   /* Define variables */
   channel_t *chan = NULL; // current working channel
   /* The last distinct chan served in a sched loop. */

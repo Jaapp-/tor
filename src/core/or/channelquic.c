@@ -169,6 +169,7 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
     return NULL;
   }
   channel_quic_t *quicchan = channel_quic_create(sock_addr, scid, conn, true);
+  channel_set_identity_digest(QUIC_CHAN_TO_BASE(quicchan), id_digest, ed_id);
   return QUIC_CHAN_TO_BASE(quicchan);
 }
 
@@ -534,6 +535,7 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   uint64_t stream_id = get_cell_stream_id(packed_cell);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
+  log_info(LD_CHANNEL, "QUIC: writing packed cell, size=%zu, stream_id=%lu", cell_network_size, stream_id);
   quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body, cell_network_size, false);
   return 0;
 }

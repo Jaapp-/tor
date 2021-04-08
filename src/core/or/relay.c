@@ -2913,8 +2913,10 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
   tor_assert(chan->cmux);
   cmux = chan->cmux;
 
+  log_info(LD_CHANNEL, "QUIC: flush from first active circuit start");
   /* Main loop: pick a circuit, send a cell, update the cmux */
   while (n_flushed < max) {
+    log_info(LD_CHANNEL, "QUIC: flush from first active circuit, flushed=%d, max=%d", n_flushed, max);
     circ = circuitmux_get_first_active_circuit(cmux, &destroy_queue);
     if (destroy_queue) {
       destroy_cell_t *dcell;

@@ -14,6 +14,7 @@
 #include "core/or/channeltls.h"
 
 #include "core/or/or_connection_st.h"
+#include "channelquic.h"
 
 /**
  * \file scheduler.c
@@ -672,6 +673,7 @@ scheduler_release_channel,(channel_t *chan))
 void
 scheduler_channel_wants_writes(channel_t *chan)
 {
+  log_info(LD_CHANNEL, "QUIC: channel_wants_writes, state=%d", chan->scheduler_state);
   IF_BUG_ONCE(!chan) {
     return;
   }
@@ -712,8 +714,13 @@ scheduler_bug_occurred(const channel_t *chan)
   char buf[128];
 
   if (chan != NULL) {
-    const size_t outbuf_len =
-      buf_datalen(TO_CONN(CONST_BASE_CHAN_TO_TLS(chan)->conn)->outbuf);
+    size_t outbuf_len = 0;
+    if (get_options()->QUIC) {
+      outbuf_len =
+          buf_datalen(TO_CONN(CONST_BASE_CHAN_TO_TLS(chan)->conn)->outbuf);
+    } else {
+      outbuf_len = sizeof(BASE_CHAN_TO_QUIC(chan)->outbuf);
+    }
     tor_snprintf(buf, sizeof(buf),
                  "Channel %" PRIu64 " in state %s and scheduler state %s."
                  " Num cells on cmux: %d. Connection outbuf len: %lu.",
