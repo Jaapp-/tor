@@ -12,10 +12,9 @@
 
 
 struct channel_quic_t {
-    HT_ENTRY(channel_quic_t) node;
-
-    uint8_t *cid[CONN_ID_LEN];
     channel_t base_;
+    HT_ENTRY(channel_quic_t) node;
+    uint8_t cid[CONN_ID_LEN];
     quiche_conn *quiche_conn;
     struct sockaddr_in *addr;
     uint8_t outbuf[MAX_DATAGRAM_SIZE];

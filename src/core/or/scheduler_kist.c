@@ -123,6 +123,10 @@ static inline size_t
 channel_outbuf_length(channel_t *chan)
 {
   tor_assert(chan);
+  if (get_options()->QUIC) {
+    return sizeof(BASE_CHAN_TO_QUIC(chan)->outbuf);
+  }
+
   /* In theory, this can not happen because we can not scheduler a channel
    * without a connection that has its outbuf initialized. Just in case, bug
    * on this so we can understand a bit more why it happened. */
@@ -475,6 +479,12 @@ MOCK_IMPL(void, channel_write_to_kernel, (channel_t *chan))
   log_debug(LD_SCHED, "Writing %lu bytes to kernel for chan %" PRIu64,
             (unsigned long)channel_outbuf_length(chan),
             chan->global_identifier);
+
+  if (get_options()->QUIC) {
+    channel_quic_flush_egress(BASE_CHAN_TO_QUIC(chan));
+    return;
+  }
+
   /* Note that 'connection_handle_write()' may change the scheduler state of
    * the channel during the scheduling loop with
    * 'connection_or_flushed_some()' -> 'scheduler_channel_wants_writes()'.
