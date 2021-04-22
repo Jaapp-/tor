@@ -14,7 +14,7 @@
 #include "core/or/channeltls.h"
 
 #include "core/or/or_connection_st.h"
-#include "channelquic.h"
+#include "core/or/channelquic.h"
 
 /**
  * \file scheduler.c

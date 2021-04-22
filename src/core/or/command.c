@@ -314,6 +314,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
            "Received create cell with unexpected circ_id %u. Closing.",
            (unsigned)cell->circ_id);
+    log_warn(LD_CHANNEL, "QUIC: bad circ_id %d, wide_circ_ids=%d, id_is_high=%d, circ_id_type=%d", cell->circ_id, chan->wide_circ_ids, id_is_high, chan->circ_id_type);
     channel_send_destroy(cell->circ_id, chan,
                          END_CIRC_REASON_TORPROTOCOL);
     return;

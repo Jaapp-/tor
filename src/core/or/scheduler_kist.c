@@ -16,12 +16,12 @@
 #define CHANNEL_OBJECT_PRIVATE
 #include "core/or/channel.h"
 #include "core/or/channeltls.h"
+#include "core/or/channelquic.h"
 #define SCHEDULER_PRIVATE
 #include "core/or/scheduler.h"
 #include "lib/math/fp.h"
 
 #include "core/or/or_connection_st.h"
-#include "channelquic.h"
 
 #ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>

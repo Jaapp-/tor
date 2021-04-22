@@ -16,6 +16,7 @@
 struct ed25519_keypair_t;
 
 int connection_or_send_certs_cell(or_connection_t *conn);
+int channel_quic_send_certs_cell(struct channel_quic_t *quicchan);
 int connection_or_send_auth_challenge_cell(or_connection_t *conn);
 
 var_cell_t *connection_or_compute_authenticate_cell_body(

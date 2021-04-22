@@ -20,12 +20,12 @@
 #include <netdb.h>
 #include <event.h>
 #include <lib/evloop/compat_libevent.h>
+#include <feature/relay/routermode.h>
 
 #include "core/or/or.h"
 #include "core/or/channel.h"
 #include "core/or/channelquic.h"
 #include "app/config/resolve_addr.h"
-#include "lib/quiche/include/quiche.h"
 #include "core/or/circuitmux_ewma.h"
 #include "core/or/extendinfo.h"
 #include "core/or/cell_st.h"
@@ -33,6 +33,8 @@
 #include "core/or/connection_or.h"
 #include "connection_st.h"
 #include "scheduler.h"
+#include "command.h"
+#include "feature/relay/relay_handshake.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
@@ -94,40 +96,45 @@ static void channel_quic_ensure_socket(void);
 
 static void channel_quic_read_streams(struct channel_quic_t *quicchan);
 
+static uint64_t get_stream_id_for_circuit(struct channel_quic_t *chan, circid_t circ_id);
+
+static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids);
+
+static void channel_quic_on_incoming_cell(struct channel_quic_t *quicchan, cell_t *cell);
+
+static void on_connection_established(struct channel_quic_t *quicchan);
+
+static void send_certs_cell(struct channel_quic_t *quicchan);
+
+static void send_auth_challenge_cell(struct channel_quic_t *quicchan);
+
 static tor_socket_t udp_socket;
 
+static HT_HEAD(circid_ht, circid_ht_entry_t) circs = HT_INITIALIZER();
 
-int
-channel_quic_equal(const struct channel_quic_t *c1, const struct channel_quic_t *c2) {
-  return tor_memeq(c1->cid, c2->cid, CONN_ID_LEN);
-}
+HT_PROTOTYPE(circid_ht, circid_ht_entry_t, node, circid_entry_hash, circid_entry_equal);
+HT_GENERATE2(circid_ht, circid_ht_entry_t, node, circid_entry_hash, circid_entry_equal, 0.6, tor_reallocarray,
+             tor_free);
 
-unsigned
-channel_quic_hash(const struct channel_quic_t *d) {
-
-  return (unsigned) siphash24g(&d->cid, CONN_ID_LEN);
-}
 
 static HT_HEAD(channel_quic_ht, channel_quic_t) quic_ht = HT_INITIALIZER();
 
-HT_PROTOTYPE(channel_quic_ht, // The name of the hashtable struct
-             channel_quic_t,    // The name of the element struct,
-             node,        // The name of HT_ENTRY member
-             channel_quic_hash, channel_quic_equal);
-
+HT_PROTOTYPE(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal);
 HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal,
              0.6, tor_reallocarray, tor_free_);
 
 
 channel_quic_t *
-channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], quiche_conn *conn, bool is_outgoing) {
+channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], quiche_conn *conn, bool started_here) {
   log_info(LD_CHANNEL, "QUIC: Creating channel cid=%s, addr=%s", fmt_quic_id(cid),
-            tor_sockaddr_to_str(
-                (const struct sockaddr *) peer_addr));
+           tor_sockaddr_to_str(
+               (const struct sockaddr *) peer_addr));
   channel_quic_t *quicchan = tor_malloc_zero(sizeof(*quicchan));
   channel_t *chan = &(quicchan->base_);
   channel_quic_common_init(quicchan);
+  quicchan->started_here = started_here;
   quicchan->addr = peer_addr;
+  quicchan->next_stream_id = started_here ? 0 : 1; // Least significant bit of stream ID determines client/server
   memcpy(quicchan->cid, cid, CONN_ID_LEN);
   log_info(LD_CHANNEL, "QUIC: id=%s", fmt_quic_id(quicchan->cid));
   quicchan->quiche_conn = conn;
@@ -136,12 +143,14 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   uint16_t port;
   tor_addr_from_sockaddr(&tor_addr, (struct sockaddr *) quicchan->addr, &port);
   chan->is_local = is_local_to_resolve_addr(&tor_addr);
-  if (is_outgoing) {
+  chan->wide_circ_ids = 1;
+  if (started_here) {
     channel_mark_outgoing(chan);
   } else {
     channel_mark_incoming(chan);
   }
   channel_register(chan);
+  command_setup_channel(chan);
 
   channel_quic_flush_egress(quicchan);
   HT_REPLACE(channel_quic_ht, &quic_ht, quicchan);
@@ -235,9 +244,7 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     int established = quiche_conn_is_established(quicchan->quiche_conn);
     if (established) {
       if (QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
-        log_info(LD_CHANNEL, "QUIC: Transition chan to openeing, state=%d", QUIC_CHAN_TO_BASE(quicchan)->state);
-        channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
-        scheduler_channel_wants_writes(QUIC_CHAN_TO_BASE(quicchan));
+        on_connection_established(quicchan);
       }
       channel_quic_read_streams(quicchan);
     }
@@ -314,7 +321,7 @@ static void stateless_retry(const uint8_t *scid, size_t scid_len, const uint8_t 
 
 
 static void debug_log(const char *line, void *argp) {
-  log_info(LD_CHANNEL, "%s", line);
+  log_debug(LD_CHANNEL, "%s", line);
 }
 
 quiche_config *create_quiche_config(bool is_client) {
@@ -328,12 +335,13 @@ quiche_config *create_quiche_config(bool is_client) {
   quiche_config_set_application_protos(config,
                                        (uint8_t *) "\x05hq-29\x05hq-28\x05hq-27\x08http/0.9", 27);
   quiche_config_set_max_idle_timeout(config, 5000);
+  quiche_config_set_max_udp_payload_size(config, MAX_DATAGRAM_SIZE);
   quiche_config_set_initial_max_data(config, 10000000);
   quiche_config_set_initial_max_stream_data_bidi_local(config, 1000000);
-  quiche_config_set_initial_max_stream_data_uni(config, 1000000);
+  quiche_config_set_initial_max_stream_data_bidi_remote(config, 1000000);
   quiche_config_set_initial_max_streams_bidi(config, 100);
-  quiche_config_set_initial_max_streams_uni(config, 100);
-  quiche_config_set_disable_active_migration(config, true);
+  quiche_config_set_cc_algorithm(config, QUICHE_CC_RENO);
+
 
   if (!is_client) {
     log_debug(LD_CHANNEL, "QUIC: loading certs");
@@ -350,7 +358,7 @@ quiche_config *create_quiche_config(bool is_client) {
   return config;
 }
 
-static int get_rng() {
+static int get_rng(void) {
   int rng = open("/dev/urandom", O_RDONLY);
   if (rng < 0) {
     log_warn(LD_CHANNEL, "QUIC: failed to open /dev/urandom");
@@ -371,7 +379,7 @@ static void
 channel_quic_close_method(channel_t *chan) {
   log_notice(LD_CHANNEL, "QUIC: close chan");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
-  int ret = quiche_conn_close(quicchan->quiche_conn, false, 0, "", 0);
+  int ret = quiche_conn_close(quicchan->quiche_conn, false, 0, (uint8_t *) "close called", 0);
   if (ret < 0) {
     perror("Closing connection failed");
   }
@@ -393,19 +401,12 @@ channel_quic_to_base(channel_quic_t *quicchan) {
   return &(quicchan->base_);
 }
 
-const channel_t *
-channel_quic_to_base_const(const channel_quic_t *quicchan) {
-  return channel_quic_to_base((channel_quic_t *) quicchan);
-}
-
-const channel_quic_t *
-channel_quic_from_base_const(const channel_t *chan) {
-  return channel_quic_from_base((channel_t *) chan);
-}
-
 
 static const char *
 channel_quic_describe_transport_method(channel_t *chan) {
+  if (!chan) {
+    return "QUIC channel (null)";
+  }
   return "QUIC channel";
 }
 
@@ -424,6 +425,9 @@ channel_quic_free_method(channel_t *chan) {
 
 static double
 channel_quic_get_overhead_estimate_method(channel_t *chan) {
+  if (!chan) {
+    log_warn(LD_CHANNEL, "channel_quic_get_overhead_estimate_method called without channel");
+  }
   log_notice(LD_CHANNEL, "QUIC: overhead estimate requested");
   double overhead = 1.0;
   // TODO
@@ -482,7 +486,7 @@ channel_quic_has_queued_writes_method(channel_t *chan) {
 }
 
 int channel_quic_is_canonical_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: isprintf(buffer,s canonical requestsed");
+  log_notice(LD_CHANNEL, "QUIC: is_canonical requested");
   return 0; // TODO
 }
 
@@ -503,8 +507,10 @@ int channel_quic_matches_target_method(channel_t *chan, const tor_addr_t *target
 
   tor_assert(quicchan);
   tor_assert(target);
-
-  return tor_addr_eq(quicchan->addr, target);
+  tor_addr_t tor_addr;
+  uint16_t port;
+  tor_addr_from_sockaddr(&tor_addr, (const struct sockaddr *) quicchan->addr, &port);
+  return tor_addr_eq(&tor_addr, target);
 }
 
 int channel_quic_num_cells_writeable_method(channel_t *chan) {
@@ -519,12 +525,6 @@ size_t channel_quic_num_bytes_queued_method(channel_t *chan) {
   return sizeof(quicchan->outbuf);
 }
 
-uint64_t get_cell_stream_id(packed_cell_t *cell) {
-  if (cell->circ_id <= 0) {
-    log_warn(LD_CHANNEL, "Converting bad circ_id to stream_id: %d", cell->circ_id);
-  }
-  return cell->circ_id;
-}
 
 int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
   log_notice(LD_CHANNEL, "QUIC: write cell");
@@ -537,11 +537,12 @@ int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
 int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed_cell) {
   log_notice(LD_CHANNEL, "QUIC: write packed cell");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
-  log_info(LD_CHANNEL, "QUIC: established=%d", quiche_conn_is_established(quicchan->quiche_conn));
-  uint64_t stream_id = get_cell_stream_id(packed_cell);
+  uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
+  log_info(LD_CHANNEL, "QUIC: Found stream id %lu for circ %d", stream_id, packed_cell->circ_id);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
   log_info(LD_CHANNEL, "QUIC: writing packed cell, size=%zu, stream_id=%lu", cell_network_size, stream_id);
-  quiche_conn_stream_send(quicchan->quiche_conn, 0, packed_cell->body, cell_network_size, 0);
+  quiche_conn_stream_send(quicchan->quiche_conn, 0, (uint8_t *) packed_cell->body, cell_network_size, 1);
+  channel_quic_flush_egress(quicchan);
   return 0;
 }
 
@@ -597,7 +598,7 @@ static void channel_quic_read_cb(tor_socket_t s, short event, void *arg) {
   channel_quic_on_incoming(s);
 }
 
-static void channel_quic_ensure_socket() {
+static void channel_quic_ensure_socket(void) {
   if (udp_socket) return;
   udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
   if (udp_socket < 0) {
@@ -716,8 +717,7 @@ static void mint_token(const uint8_t *dcid, size_t dcid_len,
   *token_len = sizeof("quiche") - 1 + addr_len + dcid_len;
 }
 
-void channel_quic_read_streams(struct channel_quic_t *quicchan)
-{
+void channel_quic_read_streams(struct channel_quic_t *quicchan) {
   static uint8_t buf[65535];
   if (!quiche_conn_is_established(quicchan->quiche_conn)) return;
   log_info(LD_CHANNEL, "QUIC: reading streams for %s", fmt_quic_id(quicchan->cid));
@@ -725,11 +725,128 @@ void channel_quic_read_streams(struct channel_quic_t *quicchan)
   quiche_stream_iter *readable = quiche_conn_readable(quicchan->quiche_conn);
 
   while (quiche_stream_iter_next(readable, &s)) {
-    log_info(LD_CHANNEL, "QUIC: %s: %d is readable", fmt_quic_id(quicchan->cid), s);
+    log_info(LD_CHANNEL, "QUIC: %s: %lu is readable", fmt_quic_id(quicchan->cid), s);
     bool fin = false;
     ssize_t recv_len =
         quiche_conn_stream_recv(quicchan->quiche_conn, s, buf, sizeof(buf), &fin);
     log_info(LD_CHANNEL, "QUIC: received %.*s", (int) recv_len, buf);
-
+    cell_t cell;
+    cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
+    channel_quic_on_incoming_cell(quicchan, &cell);
+    log_notice(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%d, command=%d", cell.circ_id, cell.command);
   }
+}
+
+
+/**
+ * We have a circid -> stream_id hashmap circs.
+ *
+ * Look up the stream id for this circuit, else use and increment the next stream id.
+ *
+ * @param chan
+ * @param circ_id
+ * @return
+ */
+static uint64_t get_stream_id_for_circuit(struct channel_quic_t *chan, circid_t circ_id) {
+  struct circid_ht_entry_t key;
+  key.circ_id = circ_id;
+  struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, &key);
+  if (entry) {
+    log_info(LD_CHANNEL, "QUIC: found stream id for %d", circ_id);
+    return entry->stream_id;
+  } else {
+    log_info(LD_CHANNEL, "QUIC: didn't find stream id %d", circ_id);
+    key.stream_id = chan->next_stream_id;
+    chan->next_stream_id += 4;
+
+    HT_REPLACE(circid_ht, &circs, &key);
+    return key.stream_id;
+  }
+}
+
+const channel_quic_t *channel_quic_from_base_const(const channel_t *chan) {
+  return channel_quic_from_base((channel_t *) chan);
+}
+
+const channel_t *channel_quic_to_base_const(const channel_quic_t *quicchan) {
+  return channel_quic_to_base((channel_quic_t *) quicchan);
+}
+
+
+int
+channel_quic_equal(const struct channel_quic_t *c1, const struct channel_quic_t *c2) {
+  return tor_memeq(c1->cid, c2->cid, CONN_ID_LEN);
+}
+
+unsigned
+channel_quic_hash(const struct channel_quic_t *d) {
+
+  return (unsigned) siphash24g(&d->cid, CONN_ID_LEN);
+}
+
+unsigned circid_entry_hash(struct circid_ht_entry_t *c) {
+  return c->circ_id;
+}
+
+int circid_entry_equal(struct circid_ht_entry_t *c1, struct circid_ht_entry_t *c2) {
+  return c1->circ_id == c2->circ_id;
+}
+
+
+static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids) {
+  if (wide_circ_ids) {
+    dest->circ_id = ntohl(get_uint32(src));
+    src += 4;
+  } else {
+    dest->circ_id = ntohs(get_uint16(src));
+    src += 2;
+  }
+  dest->command = get_uint8(src);
+  memcpy(dest->payload, src + 1, CELL_PAYLOAD_SIZE);
+}
+
+static void channel_quic_on_incoming_cell(struct channel_quic_t *quicchan, cell_t *cell) {
+  switch (cell->command) {
+    case CELL_CREATE:
+    case CELL_CREATE_FAST:
+    case CELL_CREATED:
+    case CELL_CREATED_FAST:
+    case CELL_RELAY:
+    case CELL_RELAY_EARLY:
+    case CELL_DESTROY:
+    case CELL_CREATE2:
+    case CELL_CREATED2:
+      channel_process_cell(QUIC_CHAN_TO_BASE(quicchan), cell);
+      break;
+    default:
+      log_fn(LOG_INFO, LD_PROTOCOL,
+             "QUIC: Cell of unknown type (%d) received in channel_quic.  "
+             "Dropping.",
+             cell->command);
+      break;
+  }
+}
+
+void on_connection_established(struct channel_quic_t *quicchan) {
+  log_info(LD_CHANNEL, "QUIC: Transition chan to openeing, state=%d", QUIC_CHAN_TO_BASE(quicchan)->state);
+  channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
+  scheduler_channel_wants_writes(QUIC_CHAN_TO_BASE(quicchan));
+  int started_here = quicchan->started_here;
+  if (!started_here || public_server_mode(get_options())) {
+    send_certs_cell(quicchan);
+  }
+  if (!started_here) {
+    send_auth_challenge_cell(quicchan);
+  }
+
+}
+
+
+
+void send_certs_cell(channel_quic_t *quicchan) {
+  channel_quic_send_certs_cell(quicchan);
+}
+
+void send_auth_challenge_cell(struct channel_quic_t *quicchan) {
+
 }
