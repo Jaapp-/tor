@@ -30,6 +30,8 @@
 #include "core/or/or_handshake_certs_st.h"
 #include "core/or/or_handshake_state_st.h"
 #include "core/or/var_cell_st.h"
+#include "core/or/channel.h"
+#include "core/or/channelquic.h"
 
 #include "lib/tls/tortls.h"
 #include "lib/tls/x509.h"

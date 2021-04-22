@@ -20,7 +20,6 @@
 #include <netdb.h>
 #include <event.h>
 #include <lib/evloop/compat_libevent.h>
-#include <feature/relay/routermode.h>
 
 #include "core/or/or.h"
 #include "core/or/channel.h"
@@ -35,6 +34,7 @@
 #include "scheduler.h"
 #include "command.h"
 #include "feature/relay/relay_handshake.h"
+#include "feature/relay/routermode.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
