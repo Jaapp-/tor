@@ -844,6 +844,7 @@ void on_connection_established(struct channel_quic_t *quicchan) {
 
 
 void send_certs_cell(channel_quic_t *quicchan) {
+  log_info(LD_CHANNEL, "QUIC: Sending certs cell");
   channel_quic_send_certs_cell(quicchan);
 }
 

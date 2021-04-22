@@ -195,8 +195,10 @@ int channel_quic_send_certs_cell(channel_quic_t *quicchan) {
 
   /* Get the encoded values of the X509 certificates */
   if (tor_tls_get_my_certs(conn_in_server_mode,
-                           &global_link_cert, &id_cert) < 0)
+                           &global_link_cert, &id_cert) < 0) {
+    log_debug(LD_CHANNEL, "QUIC: tor_tls_get_my_certs failed");
     return -1;
+  }
 
   /* Link certs are handled by quiche */
 
@@ -227,7 +229,6 @@ int channel_quic_send_certs_cell(channel_quic_t *quicchan) {
                    CERTTYPE_ED_ID_SIGN,
                    get_master_signing_key_cert());
   if (conn_in_server_mode) {
-    tor_assert_nonfatal(certs_cell_ed25519_disabled_for_testing);
     add_ed25519_cert(certs_cell,
                      CERTTYPE_ED_SIGN_LINK,
                      get_current_link_cert_cert());
@@ -260,7 +261,7 @@ int channel_quic_send_certs_cell(channel_quic_t *quicchan) {
   tor_assert(enc_len > 0 && enc_len <= alloc_len);
   cell->payload_len = enc_len;
 
-//  QUIC_CHAN_TO_BASE(quicchan).write_var_cell(QUIC_CHAN_TO_BASE(quicchan), cell);
+  QUIC_CHAN_TO_BASE(quicchan)->write_var_cell(QUIC_CHAN_TO_BASE(quicchan), cell);
 //  connection_or_write_var_cell_to_buf(cell, conn);
   var_cell_free(cell);
   certs_cell_free(certs_cell);
