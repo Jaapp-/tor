@@ -109,6 +109,7 @@ static void send_certs_cell(struct channel_quic_t *quicchan);
 
 static void send_auth_challenge_cell(struct channel_quic_t *quicchan);
 
+
 static tor_socket_t udp_socket;
 
 static HT_HEAD(circid_ht, circid_ht_entry_t) circs = HT_INITIALIZER();
@@ -199,7 +200,6 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
  */
 int channel_quic_on_incoming(tor_socket_t sock) {
   static uint8_t buf[65535];
-  log_debug(LD_CHANNEL, "QUIC: incoming data, %s", quiche_version());
 
   struct sockaddr_in peer_addr;
   socklen_t peer_addr_len = sizeof(peer_addr);
@@ -539,10 +539,13 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
   log_notice(LD_CHANNEL, "QUIC: write packed cell");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
-  log_info(LD_CHANNEL, "QUIC: Found stream id %lu for circ %d", stream_id, packed_cell->circ_id);
+  log_info(LD_CHANNEL, "QUIC: capacity: %zd", quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
   log_info(LD_CHANNEL, "QUIC: writing packed cell, size=%zu, stream_id=%lu", cell_network_size, stream_id);
-  quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body, cell_network_size, 1);
+  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body, cell_network_size, 0);
+  if (sent < 0) {
+    log_warn(LD_CHANNEL, "QUIC: packed cell quiche send failed: %zd", sent);
+  }
   channel_quic_flush_egress(quicchan);
   return 0;
 }
@@ -551,13 +554,15 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   static char buf[MAX_DATAGRAM_SIZE];
   tor_assert(MAX_DATAGRAM_SIZE > VAR_CELL_MAX_HEADER_SIZE + var_cell->payload_len);
-  log_notice(LD_CHANNEL, "QUIC: write var cell");
   int n;
   n = var_cell_pack_header(var_cell, buf, chan->wide_circ_ids);
   memcpy(buf + n, var_cell->payload, var_cell->payload_len);
-
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
-  quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len, 1);
+  log_notice(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len, stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len, 0);
+  if (sent < 0) {
+    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd", sent, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+  }
   channel_quic_flush_egress(quicchan);
   return 1;
 }
@@ -654,6 +659,7 @@ int channel_quic_flush_egress(struct channel_quic_t *channel) {
 
     ssize_t sent = sendto(udp_socket, channel->outbuf, written, 0, (const struct sockaddr *) channel->addr,
                           sizeof(struct sockaddr_in));
+    log_info(LD_CHANNEL, "QUIC: flushed %zdb", sent);
     if (sent != written) {
       struct sockaddr_in local_addr;
       socklen_t local_addr_len;
@@ -758,19 +764,19 @@ void channel_quic_read_streams(struct channel_quic_t *quicchan) {
  * @return
  */
 static uint64_t get_stream_id_for_circuit(struct channel_quic_t *chan, circid_t circ_id) {
-  struct circid_ht_entry_t key;
-  key.circ_id = circ_id;
-  struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, &key);
+  struct circid_ht_entry_t *key = malloc(sizeof(struct circid_ht_entry_t));
+  key->circ_id = circ_id;
+  struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
-    log_info(LD_CHANNEL, "QUIC: found stream id for %d", circ_id);
+    log_info(LD_CHANNEL, "QUIC: found stream_id=%lu for %d", entry->stream_id, circ_id);
     return entry->stream_id;
   } else {
-    log_info(LD_CHANNEL, "QUIC: didn't find stream id %d", circ_id);
-    key.stream_id = chan->next_stream_id;
+    log_info(LD_CHANNEL, "QUIC: no stream for circ_id=%d, using new stream_id=%lu", circ_id, chan->next_stream_id);
+    key->stream_id = chan->next_stream_id;
     chan->next_stream_id += 4;
 
-    HT_REPLACE(circid_ht, &circs, &key);
-    return key.stream_id;
+    HT_REPLACE(circid_ht, &circs, key);
+    return key->stream_id;
   }
 }
 

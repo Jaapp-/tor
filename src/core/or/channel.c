@@ -3400,7 +3400,7 @@ channel_rsa_id_group_set_badness(struct channel_list_t *lst, int force)
   /* if there is only one channel, don't bother looping */
   if (PREDICT_LIKELY(!TOR_LIST_NEXT(chan, next_with_same_id))) {
     if (is_quic) {
-      log_info(LD_CHANNEL, "QUIC: skipping set_badness");
+      log_debug(LD_CHANNEL, "QUIC: skipping set_badness");
     } else {
       connection_or_single_set_badness_(
           time(NULL), BASE_CHAN_TO_TLS(chan)->conn, force);
