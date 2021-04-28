@@ -95,19 +95,19 @@ static void stateless_retry(const uint8_t *scid, size_t scid_len, const uint8_t 
 
 static void channel_quic_ensure_socket(void);
 
-static void channel_quic_read_streams(struct channel_quic_t *quicchan);
+static void channel_quic_read_streams(channel_quic_t *quicchan);
 
-static uint64_t get_stream_id_for_circuit(struct channel_quic_t *chan, circid_t circ_id);
+static uint64_t get_stream_id_for_circuit(channel_quic_t *chan, circid_t circ_id);
 
 static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids);
 
-static void channel_quic_on_incoming_cell(struct channel_quic_t *quicchan, cell_t *cell);
+static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell);
 
-static void on_connection_established(struct channel_quic_t *quicchan);
+static void on_connection_established(channel_quic_t *quicchan);
 
-static void send_certs_cell(struct channel_quic_t *quicchan);
+static void send_certs_cell(channel_quic_t *quicchan);
 
-static void send_auth_challenge_cell(struct channel_quic_t *quicchan);
+static void send_auth_challenge_cell(channel_quic_t *quicchan);
 
 
 static tor_socket_t udp_socket;
@@ -233,9 +233,9 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     log_warn(LD_CHANNEL, "QUIC: Quiche header info error");
     return -1;
   }
-  struct channel_quic_t channel_key;
+  channel_quic_t channel_key;
   memcpy(channel_key.cid, dcid, dcid_len);
-  struct channel_quic_t *quicchan = HT_FIND(channel_quic_ht, &quic_ht, &channel_key);
+  channel_quic_t *quicchan = HT_FIND(channel_quic_ht, &quic_ht, &channel_key);
 
   if (quicchan) {
     int recv = quiche_conn_recv(quicchan->quiche_conn, buf, read);
@@ -322,6 +322,8 @@ static void stateless_retry(const uint8_t *scid, size_t scid_len, const uint8_t 
 
 
 static void debug_log(const char *line, void *argp) {
+  // Unused param
+  (void)argp;
   log_debug(LD_CHANNEL, "%s", line);
 }
 
@@ -380,6 +382,7 @@ static void
 channel_quic_close_method(channel_t *chan) {
   log_notice(LD_CHANNEL, "QUIC: close chan");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   int ret = quiche_conn_close(quicchan->quiche_conn, false, 0, (uint8_t *) "close called", 0);
   if (ret < 0) {
     perror("Closing connection failed");
@@ -494,6 +497,7 @@ int channel_quic_is_canonical_method(channel_t *chan) {
 int channel_quic_matches_extend_info_method(channel_t *chan, extend_info_t *extend_info) {
   log_notice(LD_CHANNEL, "QUIC: matches extend info requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   tor_addr_t tor_addr;
   uint16_t port;
   tor_addr_from_sockaddr(&tor_addr, (const struct sockaddr *) quicchan->addr, &port);
@@ -538,6 +542,7 @@ int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
 int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed_cell) {
   log_notice(LD_CHANNEL, "QUIC: write packed cell");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
   log_info(LD_CHANNEL, "QUIC: capacity: %zd", quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
@@ -610,6 +615,9 @@ static char *fmt_quic_id(uint8_t *array) {
 }
 
 static void channel_quic_read_cb(tor_socket_t s, short event, void *arg) {
+  // Unused params
+  (void)event;
+  (void)arg;
   channel_quic_on_incoming(s);
 }
 
@@ -643,7 +651,7 @@ static void channel_quic_ensure_socket(void) {
 }
 
 
-int channel_quic_flush_egress(struct channel_quic_t *channel) {
+int channel_quic_flush_egress(channel_quic_t *channel) {
   channel_quic_ensure_socket();
   while (1) {
     ssize_t written = quiche_conn_send(channel->quiche_conn, channel->outbuf, sizeof(channel->outbuf));
@@ -733,7 +741,7 @@ static void mint_token(const uint8_t *dcid, size_t dcid_len,
   *token_len = sizeof("quiche") - 1 + addr_len + dcid_len;
 }
 
-void channel_quic_read_streams(struct channel_quic_t *quicchan) {
+void channel_quic_read_streams(channel_quic_t *quicchan) {
   static uint8_t buf[65535];
   if (!quiche_conn_is_established(quicchan->quiche_conn)) return;
   log_info(LD_CHANNEL, "QUIC: reading streams for %s", fmt_quic_id(quicchan->cid));
@@ -763,7 +771,7 @@ void channel_quic_read_streams(struct channel_quic_t *quicchan) {
  * @param circ_id
  * @return
  */
-static uint64_t get_stream_id_for_circuit(struct channel_quic_t *chan, circid_t circ_id) {
+static uint64_t get_stream_id_for_circuit(channel_quic_t *chan, circid_t circ_id) {
   struct circid_ht_entry_t *key = malloc(sizeof(struct circid_ht_entry_t));
   key->circ_id = circ_id;
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
@@ -790,12 +798,12 @@ const channel_t *channel_quic_to_base_const(const channel_quic_t *quicchan) {
 
 
 int
-channel_quic_equal(const struct channel_quic_t *c1, const struct channel_quic_t *c2) {
+channel_quic_equal(const channel_quic_t *c1, const channel_quic_t *c2) {
   return tor_memeq(c1->cid, c2->cid, CONN_ID_LEN);
 }
 
 unsigned
-channel_quic_hash(const struct channel_quic_t *d) {
+channel_quic_hash(const channel_quic_t *d) {
 
   return (unsigned) siphash24g(&d->cid, CONN_ID_LEN);
 }
@@ -821,7 +829,7 @@ static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids) {
   memcpy(dest->payload, src + 1, CELL_PAYLOAD_SIZE);
 }
 
-static void channel_quic_on_incoming_cell(struct channel_quic_t *quicchan, cell_t *cell) {
+static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell) {
   log_info(LD_CHANNEL, "QUIC: incoming cell %d", cell->command);
   switch (cell->command) {
     case CELL_CREATE:
@@ -844,7 +852,7 @@ static void channel_quic_on_incoming_cell(struct channel_quic_t *quicchan, cell_
   }
 }
 
-void on_connection_established(struct channel_quic_t *quicchan) {
+void on_connection_established(channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "QUIC: Transition chan to openeing, state=%d", QUIC_CHAN_TO_BASE(quicchan)->state);
   channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
   scheduler_channel_wants_writes(QUIC_CHAN_TO_BASE(quicchan));
@@ -864,6 +872,6 @@ void send_certs_cell(channel_quic_t *quicchan) {
   channel_quic_send_certs_cell(quicchan);
 }
 
-void send_auth_challenge_cell(struct channel_quic_t *quicchan) {
+void send_auth_challenge_cell(channel_quic_t *quicchan) {
 
 }
