@@ -22,27 +22,26 @@
 /** True iff the cell command <b>command</b> is one that implies a
  * variable-length cell in Tor link protocol <b>linkproto</b>. */
 static inline int
-cell_command_is_var_length(uint8_t command, int linkproto)
-{
+cell_command_is_var_length(uint8_t command, int linkproto) {
   /* If linkproto is v2 (2), CELL_VERSIONS is the only variable-length cells
    * work as implemented here. If it's 1, there are no variable-length cells.
    * Tor does not support other versions right now, and so can't negotiate
    * them.
    */
   switch (linkproto) {
-  case 1:
-    /* Link protocol version 1 has no variable-length cells. */
-    return 0;
-  case 2:
-    /* In link protocol version 2, VERSIONS is the only variable-length cell */
-    return command == CELL_VERSIONS;
-  case 0:
-  case 3:
-  default:
-    /* In link protocol version 3 and later, and in version "unknown",
-     * commands 128 and higher indicate variable-length. VERSIONS is
-     * grandfathered in. */
-    return command == CELL_VERSIONS || command >= 128;
+    case 1:
+      /* Link protocol version 1 has no variable-length cells. */
+      return 0;
+    case 2:
+      /* In link protocol version 2, VERSIONS is the only variable-length cell */
+      return command == CELL_VERSIONS;
+    case 0:
+    case 3:
+    default:
+      /* In link protocol version 3 and later, and in version "unknown",
+       * commands 128 and higher indicate variable-length. VERSIONS is
+       * grandfathered in. */
+      return command == CELL_VERSIONS || command >= 128;
   }
 }
 
@@ -54,8 +53,7 @@ cell_command_is_var_length(uint8_t command, int linkproto)
  * of a variable-length cell on <b>buf</b>, but the whole thing isn't there
  * yet. */
 int
-fetch_var_cell_from_buf(buf_t *buf, var_cell_t **out, int linkproto)
-{
+fetch_var_cell_from_buf(buf_t *buf, var_cell_t **out, int linkproto) {
   char hdr[VAR_CELL_MAX_HEADER_SIZE];
   var_cell_t *result;
   uint8_t command;
@@ -73,7 +71,7 @@ fetch_var_cell_from_buf(buf_t *buf, var_cell_t **out, int linkproto)
     return 0;
 
   length = ntohs(get_uint16(hdr + circ_id_len + 1));
-  if (buf_datalen(buf) < (size_t)(header_len+length))
+  if (buf_datalen(buf) < (size_t) (header_len + length))
     return 1;
 
   result = var_cell_new(length);
@@ -84,9 +82,50 @@ fetch_var_cell_from_buf(buf_t *buf, var_cell_t **out, int linkproto)
     result->circ_id = ntohs(get_uint16(hdr));
 
   buf_drain(buf, header_len);
-  buf_peek(buf, (char*) result->payload, length);
+  buf_peek(buf, (char *) result->payload, length);
   buf_drain(buf, length);
 
   *out = result;
   return 1;
 }
+
+int is_var_cell(char *buf, int linkproto) {
+  const int wide_circ_ids = linkproto >= MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS;
+  const int circ_id_len = get_circ_id_size(wide_circ_ids);
+  // TODO length check
+  uint8_t command = get_uint8(buf + circ_id_len);
+  return cell_command_is_var_length(command, linkproto);
+}
+
+int fetch_var_cell_from_buffer(char *buf, size_t buflen, struct var_cell_t **out, int linkproto) {
+  var_cell_t *result;
+  uint8_t command;
+  uint16_t length;
+  const int wide_circ_ids = linkproto >= MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS;
+  const int circ_id_len = get_circ_id_size(wide_circ_ids);
+  const unsigned header_len = get_var_cell_header_size(wide_circ_ids);
+  *out = NULL;
+  if (buflen < header_len)
+    return 0;
+
+  command = get_uint8(buf + circ_id_len);
+  if (!(cell_command_is_var_length(command, linkproto)))
+    return 0;
+
+  length = ntohs(get_uint16(buf + circ_id_len + 1));
+  if (buflen < (header_len + length))
+    return 1;
+
+  result = var_cell_new(length);
+  result->command = command;
+  if (wide_circ_ids)
+    result->circ_id = ntohl(get_uint32(buf));
+  else
+    result->circ_id = ntohs(get_uint16(buf));
+
+  memcpy(result->payload, buf + header_len, length);
+
+  *out = result;
+  return 1;
+}
+

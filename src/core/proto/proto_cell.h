@@ -18,4 +18,9 @@ struct var_cell_t;
 int fetch_var_cell_from_buf(struct buf_t *buf, struct var_cell_t **out,
                             int linkproto);
 
+int is_var_cell(char* buf, int linkproto);
+
+int fetch_var_cell_from_buffer(char* buf, size_t buflen, struct var_cell_t **out,
+                            int linkproto);
+
 #endif /* !defined(TOR_PROTO_CELL_H) */

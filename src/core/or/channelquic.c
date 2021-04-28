@@ -30,7 +30,9 @@
 #include "core/or/cell_st.h"
 #include "core/or/cell_queue_st.h"
 #include "core/or/connection_or.h"
+#include "core/proto/proto_cell.h"
 #include "connection_st.h"
+#include "trunnel/link_handshake.h"
 #include "scheduler.h"
 #include "command.h"
 #include "feature/relay/relay_handshake.h"
@@ -103,9 +105,13 @@ static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids);
 
 static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell);
 
+static void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var_cell);
+
 static void on_connection_established(channel_quic_t *quicchan);
 
 static void send_certs_cell(channel_quic_t *quicchan);
+
+static void channel_process_certs_cell(var_cell_t *cell, channel_quic_t *quicchan);
 
 static void send_auth_challenge_cell(channel_quic_t *quicchan);
 
@@ -122,6 +128,7 @@ HT_GENERATE2(circid_ht, circid_ht_entry_t, node, circid_entry_hash, circid_entry
 static HT_HEAD(channel_quic_ht, channel_quic_t) quic_ht = HT_INITIALIZER();
 
 HT_PROTOTYPE(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal);
+
 HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal,
              0.6, tor_reallocarray, tor_free_);
 
@@ -323,7 +330,7 @@ static void stateless_retry(const uint8_t *scid, size_t scid_len, const uint8_t 
 
 static void debug_log(const char *line, void *argp) {
   // Unused param
-  (void)argp;
+  (void) argp;
   log_debug(LD_CHANNEL, "%s", line);
 }
 
@@ -547,7 +554,8 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
   log_info(LD_CHANNEL, "QUIC: capacity: %zd", quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
   log_info(LD_CHANNEL, "QUIC: writing packed cell, size=%zu, stream_id=%lu", cell_network_size, stream_id);
-  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body, cell_network_size, 0);
+  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body,
+                                         cell_network_size, 0);
   if (sent < 0) {
     log_warn(LD_CHANNEL, "QUIC: packed cell quiche send failed: %zd", sent);
   }
@@ -563,10 +571,13 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   n = var_cell_pack_header(var_cell, buf, chan->wide_circ_ids);
   memcpy(buf + n, var_cell->payload, var_cell->payload_len);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
-  log_notice(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len, stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
-  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len, 0);
+  log_notice(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len,
+             stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
+                                         0);
   if (sent < 0) {
-    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd", sent, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd", sent,
+             quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   }
   channel_quic_flush_egress(quicchan);
   return 1;
@@ -616,8 +627,8 @@ static char *fmt_quic_id(uint8_t *array) {
 
 static void channel_quic_read_cb(tor_socket_t s, short event, void *arg) {
   // Unused params
-  (void)event;
-  (void)arg;
+  (void) event;
+  (void) arg;
   channel_quic_on_incoming(s);
 }
 
@@ -753,11 +764,19 @@ void channel_quic_read_streams(channel_quic_t *quicchan) {
     bool fin = false;
     ssize_t recv_len =
         quiche_conn_stream_recv(quicchan->quiche_conn, s, buf, sizeof(buf), &fin);
-    log_info(LD_CHANNEL, "QUIC: received %.*s", (int) recv_len, buf);
-    cell_t cell;
-    cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
-    channel_quic_on_incoming_cell(quicchan, &cell);
-    log_notice(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%d, command=%d", cell.circ_id, cell.command);
+    if (is_var_cell((char *) buf, MAX_LINK_PROTO)) {
+      log_notice(LD_CHANNEL, "QUIC: received var cell");
+      var_cell_t *cell;
+      fetch_var_cell_from_buffer((char *) buf, recv_len, &cell, MAX_LINK_PROTO);
+      log_info(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%d", cell->command,
+               cell->payload_len, cell->circ_id);
+      channel_quic_on_incoming_var_cell(quicchan, cell);
+    } else {
+      cell_t cell;
+      cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
+      channel_quic_on_incoming_cell(quicchan, &cell);
+      log_notice(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%d, command=%d", cell.circ_id, cell.command);
+    }
   }
 }
 
@@ -844,11 +863,18 @@ static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell
       channel_process_cell(QUIC_CHAN_TO_BASE(quicchan), cell);
       break;
     default:
-      log_fn(LOG_INFO, LD_PROTOCOL,
-             "QUIC: Cell of unknown type (%d) received in channel_quic.  "
-             "Dropping.",
-             cell->command);
+      log_warn(LD_CHANNEL, "QUIC: Cell of unknown type (%d) received. Dropping.", cell->command);
       break;
+  }
+}
+
+void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var_cell) {
+  switch (var_cell->command) {
+    case CELL_CERTS:
+      channel_process_certs_cell(var_cell, quicchan);
+      break;
+    default:
+      log_warn(LD_CHANNEL, "QUIC: Var cell of unknown type (%d) received. Dropping.", var_cell->command);
   }
 }
 
@@ -870,6 +896,18 @@ void on_connection_established(channel_quic_t *quicchan) {
 void send_certs_cell(channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "QUIC: Sending certs cell");
   channel_quic_send_certs_cell(quicchan);
+}
+
+
+static void channel_process_certs_cell(var_cell_t *cell, channel_quic_t *quicchan) {
+  log_info(LD_CHANNEL, "Processing certs cell, circ_id=%d", cell->circ_id);
+
+  certs_cell_t *cc = NULL;
+  if (certs_cell_parse(&cc, cell->payload, cell->payload_len) < 0) {
+    log_warn(LD_CHANNEL, "QUIC: certs_cell_parse failed");
+    return;
+  }
+  log_info(LD_CHANNEL, "QUIC: certs_cell_parse succeeded");
 }
 
 void send_auth_challenge_cell(channel_quic_t *quicchan) {
