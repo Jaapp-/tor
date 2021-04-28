@@ -35,6 +35,7 @@
 #include "command.h"
 #include "feature/relay/relay_handshake.h"
 #include "feature/relay/routermode.h"
+#include "var_cell_st.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
@@ -541,15 +542,24 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
   log_info(LD_CHANNEL, "QUIC: Found stream id %lu for circ %d", stream_id, packed_cell->circ_id);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
   log_info(LD_CHANNEL, "QUIC: writing packed cell, size=%zu, stream_id=%lu", cell_network_size, stream_id);
-  quiche_conn_stream_send(quicchan->quiche_conn, 0, (uint8_t *) packed_cell->body, cell_network_size, 1);
+  quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body, cell_network_size, 1);
   channel_quic_flush_egress(quicchan);
   return 0;
 }
 
 int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
+  channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  static char buf[MAX_DATAGRAM_SIZE];
+  tor_assert(MAX_DATAGRAM_SIZE > VAR_CELL_MAX_HEADER_SIZE + var_cell->payload_len);
   log_notice(LD_CHANNEL, "QUIC: write var cell");
-  log_warn(LD_CHANNEL, "channelquic: Writing var_cell is not yet implemented");
-  return 1; // TODO
+  int n;
+  n = var_cell_pack_header(var_cell, buf, chan->wide_circ_ids);
+  memcpy(buf + n, var_cell->payload, var_cell->payload_len);
+
+  uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
+  quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len, 1);
+  channel_quic_flush_egress(quicchan);
+  return 1;
 }
 
 void
@@ -806,6 +816,7 @@ static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids) {
 }
 
 static void channel_quic_on_incoming_cell(struct channel_quic_t *quicchan, cell_t *cell) {
+  log_info(LD_CHANNEL, "QUIC: incoming cell %d", cell->command);
   switch (cell->command) {
     case CELL_CREATE:
     case CELL_CREATE_FAST:
@@ -840,7 +851,6 @@ void on_connection_established(struct channel_quic_t *quicchan) {
   }
 
 }
-
 
 
 void send_certs_cell(channel_quic_t *quicchan) {
