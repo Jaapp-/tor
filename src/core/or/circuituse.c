@@ -117,6 +117,7 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
                       int need_uptime, int need_internal,
                       time_t now)
 {
+  log_info(LD_CHANNEL, "QUIC: checking circuit acceptable: %d", origin_circ->global_identifier);
   const circuit_t *circ = TO_CIRCUIT(origin_circ);
   const node_t *exitnode;
   cpath_build_state_t *build_state;

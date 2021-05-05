@@ -19,7 +19,6 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <event.h>
-#include <lib/evloop/compat_libevent.h>
 
 #include "core/or/or.h"
 #include "core/or/channel.h"
@@ -38,6 +37,11 @@
 #include "feature/relay/relay_handshake.h"
 #include "feature/relay/routermode.h"
 #include "var_cell_st.h"
+#include "feature/nodelist/torcert.h"
+#include "lib/tls/x509.h"
+#include "lib/evloop/compat_libevent.h"
+#include "core/or/or_handshake_certs_st.h"
+#include "lib/crypt_ops/crypto_rand.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
@@ -109,8 +113,6 @@ static void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell
 
 static void on_connection_established(channel_quic_t *quicchan);
 
-static void send_certs_cell(channel_quic_t *quicchan);
-
 static void channel_process_certs_cell(var_cell_t *cell, channel_quic_t *quicchan);
 
 static void send_auth_challenge_cell(channel_quic_t *quicchan);
@@ -128,6 +130,10 @@ HT_GENERATE2(circid_ht, circid_ht_entry_t, node, circid_entry_hash, circid_entry
 static HT_HEAD(channel_quic_ht, channel_quic_t) quic_ht = HT_INITIALIZER();
 
 HT_PROTOTYPE(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal);
+
+void channel_process_auth_challenge_cell(channel_quic_t *quicchan, var_cell_t *cell);
+
+void send_auth_cell(channel_quic_t *quicchan, int use_type);;
 
 HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal,
              0.6, tor_reallocarray, tor_free_);
@@ -873,9 +879,45 @@ void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var
     case CELL_CERTS:
       channel_process_certs_cell(var_cell, quicchan);
       break;
+    case CELL_AUTH_CHALLENGE:
+      channel_process_auth_challenge_cell(quicchan, var_cell);
+      break;
     default:
       log_warn(LD_CHANNEL, "QUIC: Var cell of unknown type (%d) received. Dropping.", var_cell->command);
   }
+}
+
+void channel_process_auth_challenge_cell(channel_quic_t *quicchan, var_cell_t *cell) {
+  auth_challenge_cell_t *ac = NULL;
+  int n_types, i, use_type = -1;
+  if (auth_challenge_cell_parse(&ac, cell->payload, cell->payload_len) < 0) {
+    log_warn(LD_CHANNEL, "QUIC: auth challenge cell parse failed");
+    return;
+  }
+  n_types = ac->n_methods;
+
+  /* Now see if there is an authentication type we can use */
+  for (i = 0; i < n_types; ++i) {
+    uint16_t authtype = auth_challenge_cell_get_methods(ac, i);
+    if (authchallenge_type_is_supported(authtype)) {
+      if (use_type == -1 ||
+          authchallenge_type_is_better(authtype, use_type)) {
+        use_type = authtype;
+      }
+    }
+  }
+  if (!public_server_mode(get_options())) {
+    log_info(LD_CHANNEL, "QUIC: we're not a public server, not responding to auth challenge");
+    return;
+  }
+  if (use_type <= 0) {
+    log_warn(LD_CHANNEL, "QUIC: unknown authentication type (%d)", use_type);
+  }
+  send_auth_cell(quicchan, use_type);
+}
+
+void send_auth_cell(channel_quic_t *quicchan, int use_type) {
+  log_info(LD_CHANNEL, "QUIC: sending auth cell");
 }
 
 void on_connection_established(channel_quic_t *quicchan) {
@@ -884,32 +926,184 @@ void on_connection_established(channel_quic_t *quicchan) {
   scheduler_channel_wants_writes(QUIC_CHAN_TO_BASE(quicchan));
   int started_here = quicchan->started_here;
   if (!started_here || public_server_mode(get_options())) {
-    send_certs_cell(quicchan);
+    log_info(LD_CHANNEL, "QUIC: Sending certs cell");
+    channel_quic_send_certs_cell(quicchan);
   }
   if (!started_here) {
     send_auth_challenge_cell(quicchan);
   }
-
 }
 
+/* from channeltls */
+typedef enum cert_encoding_t {
+    CERT_ENCODING_UNKNOWN, /**< We don't recognize this. */
+    CERT_ENCODING_X509, /**< It's an RSA key, signed with RSA, encoded in x509.
+                   * (Actually, it might not be RSA. We test that later.) */
+    CERT_ENCODING_ED25519, /**< It's something signed with an Ed25519 key,
+                      * encoded asa a tor_cert_t.*/
+    CERT_ENCODING_RSA_CROSSCERT, /**< It's an Ed key signed with an RSA key. */
+} cert_encoding_t;
 
-void send_certs_cell(channel_quic_t *quicchan) {
-  log_info(LD_CHANNEL, "QUIC: Sending certs cell");
-  channel_quic_send_certs_cell(quicchan);
+/* from channeltls */
+static cert_encoding_t
+certs_cell_typenum_to_cert_type(int typenum) {
+  switch (typenum) {
+    case CERTTYPE_RSA1024_ID_LINK:
+    case CERTTYPE_RSA1024_ID_ID:
+    case CERTTYPE_RSA1024_ID_AUTH:
+      return CERT_ENCODING_X509;
+    case CERTTYPE_ED_ID_SIGN:
+    case CERTTYPE_ED_SIGN_LINK:
+    case CERTTYPE_ED_SIGN_AUTH:
+      return CERT_ENCODING_ED25519;
+    case CERTTYPE_RSA1024_ID_EDID:
+      return CERT_ENCODING_RSA_CROSSCERT;
+    default:
+      return CERT_ENCODING_UNKNOWN;
+  }
 }
 
+#define MAX_CERT_TYPE_WANTED CERTTYPE_RSA1024_ID_EDID
 
 static void channel_process_certs_cell(var_cell_t *cell, channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "Processing certs cell, circ_id=%d", cell->circ_id);
 
+  tor_x509_cert_t *x509_certs[MAX_CERT_TYPE_WANTED + 1];
+  tor_cert_t *ed_certs[MAX_CERT_TYPE_WANTED + 1];
+  uint8_t *rsa_ed_cc_cert = NULL;
+  size_t rsa_ed_cc_cert_len = 0;
   certs_cell_t *cc = NULL;
   if (certs_cell_parse(&cc, cell->payload, cell->payload_len) < 0) {
     log_warn(LD_CHANNEL, "QUIC: certs_cell_parse failed");
     return;
   }
   log_info(LD_CHANNEL, "QUIC: certs_cell_parse succeeded");
+
+  int n_certs = cc->n_certs;
+  or_handshake_certs_t *certs = or_handshake_certs_new();
+  certs->started_here = quicchan->started_here;
+
+  for (int i = 0; i < n_certs; ++i) {
+    certs_cell_cert_t *c = certs_cell_get_certs(cc, i);
+
+    uint16_t cert_type = c->cert_type;
+    uint16_t cert_len = c->cert_len;
+    uint8_t *cert_body = certs_cell_cert_getarray_body(c);
+    log_info(LD_CHANNEL, "QUIC: got cert, cert_type=%d", cert_type);
+    const cert_encoding_t ct = certs_cell_typenum_to_cert_type(cert_type);
+
+    switch (ct) {
+      default:
+      case CERT_ENCODING_UNKNOWN:
+        break;
+      case CERT_ENCODING_X509: {
+        tor_x509_cert_t *x509_cert = tor_x509_cert_decode(cert_body, cert_len);
+        if (!x509_cert) {
+          log_warn(LD_CHANNEL, "QUIC: failed to decode x509 cert, type=%d", cert_type);
+        } else {
+          if (x509_certs[cert_type]) {
+            tor_x509_cert_free(x509_cert);
+            log_warn(LD_CHANNEL, "QUIC: duplicate x509 cert");
+          } else {
+            x509_certs[cert_type] = x509_cert;
+          }
+        }
+        break;
+      }
+      case CERT_ENCODING_ED25519: {
+        tor_cert_t *ed_cert = tor_cert_parse(cert_body, cert_len);
+        if (!ed_cert) {
+          log_warn(LD_CHANNEL, "QUIC: failed to decode ed cert, type=%d", cert_type);
+        } else {
+          if (ed_certs[cert_type]) {
+            tor_cert_free(ed_cert);
+            log_warn(LD_CHANNEL, "QUIC: duplicate ed cert");
+          } else {
+            ed_certs[cert_type] = ed_cert;
+          }
+        }
+        break;
+      }
+
+      case CERT_ENCODING_RSA_CROSSCERT: {
+        if (rsa_ed_cc_cert) {
+          log_warn(LD_CHANNEL, "QUIC: RSA->Ed25519 crosscert");
+        } else {
+          rsa_ed_cc_cert = tor_memdup(cert_body, cert_len);
+          rsa_ed_cc_cert_len = cert_len;
+        }
+        break;
+      }
+    }
+  }
+
+  /* Move the certificates we (might) want into the handshake_state->certs
+   * structure. */
+  tor_x509_cert_t *id_cert = x509_certs[CERTTYPE_RSA1024_ID_ID];
+  tor_x509_cert_t *auth_cert = x509_certs[CERTTYPE_RSA1024_ID_AUTH];
+  tor_x509_cert_t *link_cert = x509_certs[CERTTYPE_RSA1024_ID_LINK];
+  certs->auth_cert = auth_cert;
+  certs->link_cert = link_cert;
+  certs->id_cert = id_cert;
+  x509_certs[CERTTYPE_RSA1024_ID_ID] =
+  x509_certs[CERTTYPE_RSA1024_ID_AUTH] =
+  x509_certs[CERTTYPE_RSA1024_ID_LINK] = NULL;
+
+  tor_cert_t *ed_id_sign = ed_certs[CERTTYPE_ED_ID_SIGN];
+  tor_cert_t *ed_sign_link = ed_certs[CERTTYPE_ED_SIGN_LINK];
+  tor_cert_t *ed_sign_auth = ed_certs[CERTTYPE_ED_SIGN_AUTH];
+  certs->ed_id_sign = ed_id_sign;
+  certs->ed_sign_link = ed_sign_link;
+  certs->ed_sign_auth = ed_sign_auth;
+  ed_certs[CERTTYPE_ED_ID_SIGN] =
+  ed_certs[CERTTYPE_ED_SIGN_LINK] =
+  ed_certs[CERTTYPE_ED_SIGN_AUTH] = NULL;
+
+  certs->ed_rsa_crosscert = rsa_ed_cc_cert;
+  certs->ed_rsa_crosscert_len = rsa_ed_cc_cert_len;
+  rsa_ed_cc_cert = NULL;
+
+  int severity = LOG_WARN;
+  const ed25519_public_key_t *checked_ed_id = NULL;
+  const common_digests_t *checked_rsa_id = NULL;
+  log_info(LD_CHANNEL, "QUIC: checking handshake certs");
+
+  // TODO: actually check this???
+  checked_ed_id = &certs->ed_id_sign->signing_key;
+  checked_rsa_id = tor_x509_cert_get_id_digests(certs->id_cert);
+//  or_handshake_certs_check_both(severity,
+//                                certs,
+//                                NULL,
+//                                time(NULL),
+//                                &checked_ed_id,
+//                                &checked_rsa_id);
+  log_info(LD_CHANNEL, "QUIC: checking handshake certs done, ed=%d, rsa=%d", checked_ed_id, checked_rsa_id);
 }
 
 void send_auth_challenge_cell(channel_quic_t *quicchan) {
+  var_cell_t *cell = NULL;
+  auth_challenge_cell_t *ac = auth_challenge_cell_new();
 
+  tor_assert(sizeof(ac->challenge) == 32);
+  crypto_rand((char *) ac->challenge, sizeof(ac->challenge));
+
+  if (authchallenge_type_is_supported(AUTHTYPE_RSA_SHA256_TLSSECRET))
+    auth_challenge_cell_add_methods(ac, AUTHTYPE_RSA_SHA256_TLSSECRET);
+  if (authchallenge_type_is_supported(AUTHTYPE_ED25519_SHA256_RFC5705))
+    auth_challenge_cell_add_methods(ac, AUTHTYPE_ED25519_SHA256_RFC5705);
+  auth_challenge_cell_set_n_methods(ac,
+                                    auth_challenge_cell_getlen_methods(ac));
+
+  cell = var_cell_new(auth_challenge_cell_encoded_len(ac));
+  ssize_t len = auth_challenge_cell_encode(cell->payload, cell->payload_len,
+                                           ac);
+  if (len != cell->payload_len) {
+    log_warn(LD_BUG, "Encoded auth challenge cell length not as expected");
+    return;
+  }
+  cell->command = CELL_AUTH_CHALLENGE;
+
+  channel_quic_write_var_cell_method(QUIC_CHAN_TO_BASE(quicchan), cell);
+  var_cell_free(cell);
+  auth_challenge_cell_free(ac);
 }

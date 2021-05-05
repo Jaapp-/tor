@@ -563,6 +563,7 @@ or_handshake_certs_ed25519_ok(int severity,
   if (certs->started_here) {
     if (! certs->ed_sign_link)
       ERR("No Ed25519 link key");
+    if (!get_options()->QUIC)
     {
       /* check for a match with the TLS cert. */
       tor_x509_cert_t *peer_cert = tor_tls_get_peer_cert(tls);
@@ -605,8 +606,10 @@ or_handshake_certs_ed25519_ok(int severity,
   if (!rsa_id_cert) {
     ERR("Missing legacy RSA ID certificate");
   }
-  if (! tor_tls_cert_is_valid(severity, rsa_id_cert, rsa_id_cert, now, 1)) {
-    ERR("The legacy RSA ID certificate was not valid");
+  if (!get_options()->QUIC) {
+    if (! tor_tls_cert_is_valid(severity, rsa_id_cert, rsa_id_cert, now, 1)) {
+      ERR("The legacy RSA ID certificate was not valid");
+    }
   }
   if (! certs->ed_rsa_crosscert) {
     ERR("Missing RSA->Ed25519 crosscert");
