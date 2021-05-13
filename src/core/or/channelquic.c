@@ -19,6 +19,10 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <event.h>
+#include <lib/tls/x509.h>
+
+
+#define ORCONN_EVENT_PRIVATE
 
 #include "core/or/or.h"
 #include "core/or/channel.h"
@@ -42,6 +46,9 @@
 #include "lib/evloop/compat_libevent.h"
 #include "core/or/or_handshake_certs_st.h"
 #include "lib/crypt_ops/crypto_rand.h"
+#include "lib/tls/tortls.h"
+#include "feature/relay/router.h"
+#include "core/or/orconn_event.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
@@ -113,12 +120,12 @@ static void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell
 
 static void on_connection_established(channel_quic_t *quicchan);
 
-static void channel_process_certs_cell(var_cell_t *cell, channel_quic_t *quicchan);
-
-static void send_auth_challenge_cell(channel_quic_t *quicchan);
-
+static void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state);
 
 static tor_socket_t udp_socket;
+
+static char my_digest_id[DIGEST_LEN];
+static int my_digest_id_initialized = 0;
 
 static HT_HEAD(circid_ht, circid_ht_entry_t) circs = HT_INITIALIZER();
 
@@ -133,7 +140,13 @@ HT_PROTOTYPE(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_q
 
 void channel_process_auth_challenge_cell(channel_quic_t *quicchan, var_cell_t *cell);
 
-void send_auth_cell(channel_quic_t *quicchan, int use_type);;
+void send_auth_cell(channel_quic_t *quicchan, int use_type);
+
+void channel_quic_send_id_cert_cell(channel_quic_t *quicchan);
+
+char *channel_quic_get_my_id(void);
+
+void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell);
 
 HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal,
              0.6, tor_reallocarray, tor_free_);
@@ -148,10 +161,10 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   channel_t *chan = &(quicchan->base_);
   channel_quic_common_init(quicchan);
   quicchan->started_here = started_here;
+  quicchan->is_established = 0;
   quicchan->addr = peer_addr;
   quicchan->next_stream_id = started_here ? 0 : 1; // Least significant bit of stream ID determines client/server
   memcpy(quicchan->cid, cid, CONN_ID_LEN);
-  log_info(LD_CHANNEL, "QUIC: id=%s", fmt_quic_id(quicchan->cid));
   quicchan->quiche_conn = conn;
 
   tor_addr_t tor_addr;
@@ -164,8 +177,8 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   } else {
     channel_mark_incoming(chan);
   }
-  channel_register(chan);
   command_setup_channel(chan);
+  channel_quic_state_publish(quicchan, OR_CONN_STATE_CONNECTING);
 
   channel_quic_flush_egress(quicchan);
   HT_REPLACE(channel_quic_ht, &quic_ht, quicchan);
@@ -196,8 +209,10 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
     return NULL;
   }
   channel_quic_t *quicchan = channel_quic_create(sock_addr, scid, conn, true);
-  channel_set_identity_digest(QUIC_CHAN_TO_BASE(quicchan), id_digest, ed_id);
-  return QUIC_CHAN_TO_BASE(quicchan);
+  channel_t *chan = QUIC_CHAN_TO_BASE(quicchan);
+  channel_set_identity_digest(chan, id_digest, ed_id);
+  channel_register(chan);
+  return chan;
 }
 
 
@@ -257,7 +272,7 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     }
     int established = quiche_conn_is_established(quicchan->quiche_conn);
     if (established) {
-      if (QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
+      if (!quicchan->is_established) {
         on_connection_established(quicchan);
       }
       channel_quic_read_streams(quicchan);
@@ -291,7 +306,8 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     log_notice(LD_CHANNEL, "QUIC: rx new recv=%db, cid=%s, addr=%s", recv, fmt_quic_id(dcid),
                tor_sockaddr_to_str(
                    (const struct sockaddr *) &peer_addr));
-    channel_quic_create(&peer_addr, dcid, conn, false);
+    quicchan = channel_quic_create(&peer_addr, dcid, conn, false);
+    channel_register(QUIC_CHAN_TO_BASE(quicchan));
   }
   return 0;
 }
@@ -684,7 +700,7 @@ int channel_quic_flush_egress(channel_quic_t *channel) {
 
     ssize_t sent = sendto(udp_socket, channel->outbuf, written, 0, (const struct sockaddr *) channel->addr,
                           sizeof(struct sockaddr_in));
-    log_info(LD_CHANNEL, "QUIC: flushed %zdb", sent);
+    log_debug(LD_CHANNEL, "QUIC: flushed %zdb", sent);
     if (sent != written) {
       struct sockaddr_in local_addr;
       socklen_t local_addr_len;
@@ -698,11 +714,12 @@ int channel_quic_flush_egress(channel_quic_t *channel) {
       return 1;
     }
 
-    log_notice(LD_CHANNEL, "QUIC: tx sent=%zdb, cid=%s, addr=%s", sent, fmt_quic_id(channel->cid),
-               tor_sockaddr_to_str(
-                   (const struct sockaddr *) channel->addr));
+    log_debug(LD_CHANNEL, "QUIC: tx sent=%zdb, cid=%s, addr=%s", sent, fmt_quic_id(channel->cid),
+              tor_sockaddr_to_str(
+                  (const struct sockaddr *) channel->addr));
   }
   return 0;
+  // TODO
 //    double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
 //    conn_io->timer.repeat = t;
 //    ev_timer_again(loop, &conn_io->timer);
@@ -761,27 +778,27 @@ static void mint_token(const uint8_t *dcid, size_t dcid_len,
 void channel_quic_read_streams(channel_quic_t *quicchan) {
   static uint8_t buf[65535];
   if (!quiche_conn_is_established(quicchan->quiche_conn)) return;
-  log_info(LD_CHANNEL, "QUIC: reading streams for %s", fmt_quic_id(quicchan->cid));
+  log_debug(LD_CHANNEL, "QUIC: reading streams for %s", fmt_quic_id(quicchan->cid));
   uint64_t s = 0;
   quiche_stream_iter *readable = quiche_conn_readable(quicchan->quiche_conn);
 
   while (quiche_stream_iter_next(readable, &s)) {
-    log_info(LD_CHANNEL, "QUIC: %s: %lu is readable", fmt_quic_id(quicchan->cid), s);
+    log_debug(LD_CHANNEL, "QUIC: %s: %lu is readable", fmt_quic_id(quicchan->cid), s);
     bool fin = false;
     ssize_t recv_len =
         quiche_conn_stream_recv(quicchan->quiche_conn, s, buf, sizeof(buf), &fin);
     if (is_var_cell((char *) buf, MAX_LINK_PROTO)) {
-      log_notice(LD_CHANNEL, "QUIC: received var cell");
+      log_info(LD_CHANNEL, "QUIC: received var cell");
       var_cell_t *cell;
       fetch_var_cell_from_buffer((char *) buf, recv_len, &cell, MAX_LINK_PROTO);
-      log_info(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%d", cell->command,
-               cell->payload_len, cell->circ_id);
+      log_debug(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%d", cell->command,
+                cell->payload_len, cell->circ_id);
       channel_quic_on_incoming_var_cell(quicchan, cell);
     } else {
       cell_t cell;
       cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
       channel_quic_on_incoming_cell(quicchan, &cell);
-      log_notice(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%d, command=%d", cell.circ_id, cell.command);
+      log_info(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%d, command=%d", cell.circ_id, cell.command);
     }
   }
 }
@@ -876,234 +893,80 @@ static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell
 
 void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var_cell) {
   switch (var_cell->command) {
-    case CELL_CERTS:
-      channel_process_certs_cell(var_cell, quicchan);
-      break;
-    case CELL_AUTH_CHALLENGE:
-      channel_process_auth_challenge_cell(quicchan, var_cell);
+    case CELL_ID_DIGEST:
+      log_info(LD_CHANNEL, "Received id cert cell");
+      channel_quic_handle_id_cert_cell(quicchan, var_cell);
       break;
     default:
       log_warn(LD_CHANNEL, "QUIC: Var cell of unknown type (%d) received. Dropping.", var_cell->command);
   }
 }
 
-void channel_process_auth_challenge_cell(channel_quic_t *quicchan, var_cell_t *cell) {
-  auth_challenge_cell_t *ac = NULL;
-  int n_types, i, use_type = -1;
-  if (auth_challenge_cell_parse(&ac, cell->payload, cell->payload_len) < 0) {
-    log_warn(LD_CHANNEL, "QUIC: auth challenge cell parse failed");
-    return;
-  }
-  n_types = ac->n_methods;
+void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell) {
+  char their_id[DIGEST_LEN];
+  tor_assert(cell->payload_len == DIGEST_LEN);
+  memcpy(their_id, cell->payload, cell->payload_len);
+  log_info(LD_CHANNEL, "QUIC: received id: %s", hex_str(their_id, DIGEST_LEN));
+  if (QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
+    channel_t *chan = QUIC_CHAN_TO_BASE(quicchan);
 
-  /* Now see if there is an authentication type we can use */
-  for (i = 0; i < n_types; ++i) {
-    uint16_t authtype = auth_challenge_cell_get_methods(ac, i);
-    if (authchallenge_type_is_supported(authtype)) {
-      if (use_type == -1 ||
-          authchallenge_type_is_better(authtype, use_type)) {
-        use_type = authtype;
-      }
-    }
-  }
-  if (!public_server_mode(get_options())) {
-    log_info(LD_CHANNEL, "QUIC: we're not a public server, not responding to auth challenge");
-    return;
-  }
-  if (use_type <= 0) {
-    log_warn(LD_CHANNEL, "QUIC: unknown authentication type (%d)", use_type);
-  }
-  send_auth_cell(quicchan, use_type);
-}
+    // Emulate receiving NETINFO for our test setup
+    chan->is_canonical_to_peer = 1;
+    struct sockaddr_in sockaddr;
+    sockaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    tor_addr_t tor_addr;
+    uint16_t port;
+    tor_addr_from_sockaddr(&tor_addr, (const struct sockaddr *) &sockaddr, &port);
+    tor_addr_copy(&chan->addr_according_to_peer, &tor_addr);
 
-void send_auth_cell(channel_quic_t *quicchan, int use_type) {
-  log_info(LD_CHANNEL, "QUIC: sending auth cell");
+
+    log_info(LD_CHANNEL, "QUIC: opening channel");
+    channel_set_circid_type(chan, NULL, 0);
+    channel_set_identity_digest(chan, their_id, NULL);
+    channel_change_state_open(chan);
+    scheduler_channel_wants_writes(chan);
+    channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
+  }
 }
 
 void on_connection_established(channel_quic_t *quicchan) {
-  log_info(LD_CHANNEL, "QUIC: Transition chan to openeing, state=%d", QUIC_CHAN_TO_BASE(quicchan)->state);
-  channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
-  scheduler_channel_wants_writes(QUIC_CHAN_TO_BASE(quicchan));
-  int started_here = quicchan->started_here;
-  if (!started_here || public_server_mode(get_options())) {
-    log_info(LD_CHANNEL, "QUIC: Sending certs cell");
-    channel_quic_send_certs_cell(quicchan);
+  log_info(LD_CHANNEL, "QUIC: Connection established, sending id cell");
+  quicchan->is_established = 1;
+
+  crypto_pk_t *my_key;
+  if (quicchan->started_here) {
+    my_key = get_tlsclient_identity_key();
+  } else {
+    my_key = get_server_identity_key();
   }
-  if (!started_here) {
-    send_auth_challenge_cell(quicchan);
-  }
-}
+  char my_digest[DIGEST_LEN];
+  crypto_pk_get_digest(my_key, my_digest);
 
-/* from channeltls */
-typedef enum cert_encoding_t {
-    CERT_ENCODING_UNKNOWN, /**< We don't recognize this. */
-    CERT_ENCODING_X509, /**< It's an RSA key, signed with RSA, encoded in x509.
-                   * (Actually, it might not be RSA. We test that later.) */
-    CERT_ENCODING_ED25519, /**< It's something signed with an Ed25519 key,
-                      * encoded asa a tor_cert_t.*/
-    CERT_ENCODING_RSA_CROSSCERT, /**< It's an Ed key signed with an RSA key. */
-} cert_encoding_t;
+  char my_hex_digest[HEX_DIGEST_LEN + 1];
+  base16_encode(my_hex_digest, HEX_DIGEST_LEN + 1, my_digest, DIGEST_LEN);
 
-/* from channeltls */
-static cert_encoding_t
-certs_cell_typenum_to_cert_type(int typenum) {
-  switch (typenum) {
-    case CERTTYPE_RSA1024_ID_LINK:
-    case CERTTYPE_RSA1024_ID_ID:
-    case CERTTYPE_RSA1024_ID_AUTH:
-      return CERT_ENCODING_X509;
-    case CERTTYPE_ED_ID_SIGN:
-    case CERTTYPE_ED_SIGN_LINK:
-    case CERTTYPE_ED_SIGN_AUTH:
-      return CERT_ENCODING_ED25519;
-    case CERTTYPE_RSA1024_ID_EDID:
-      return CERT_ENCODING_RSA_CROSSCERT;
-    default:
-      return CERT_ENCODING_UNKNOWN;
-  }
-}
-
-#define MAX_CERT_TYPE_WANTED CERTTYPE_RSA1024_ID_EDID
-
-static void channel_process_certs_cell(var_cell_t *cell, channel_quic_t *quicchan) {
-  log_info(LD_CHANNEL, "Processing certs cell, circ_id=%d", cell->circ_id);
-
-  tor_x509_cert_t *x509_certs[MAX_CERT_TYPE_WANTED + 1];
-  tor_cert_t *ed_certs[MAX_CERT_TYPE_WANTED + 1];
-  uint8_t *rsa_ed_cc_cert = NULL;
-  size_t rsa_ed_cc_cert_len = 0;
-  certs_cell_t *cc = NULL;
-  if (certs_cell_parse(&cc, cell->payload, cell->payload_len) < 0) {
-    log_warn(LD_CHANNEL, "QUIC: certs_cell_parse failed");
-    return;
-  }
-  log_info(LD_CHANNEL, "QUIC: certs_cell_parse succeeded");
-
-  int n_certs = cc->n_certs;
-  or_handshake_certs_t *certs = or_handshake_certs_new();
-  certs->started_here = quicchan->started_here;
-
-  for (int i = 0; i < n_certs; ++i) {
-    certs_cell_cert_t *c = certs_cell_get_certs(cc, i);
-
-    uint16_t cert_type = c->cert_type;
-    uint16_t cert_len = c->cert_len;
-    uint8_t *cert_body = certs_cell_cert_getarray_body(c);
-    log_info(LD_CHANNEL, "QUIC: got cert, cert_type=%d", cert_type);
-    const cert_encoding_t ct = certs_cell_typenum_to_cert_type(cert_type);
-
-    switch (ct) {
-      default:
-      case CERT_ENCODING_UNKNOWN:
-        break;
-      case CERT_ENCODING_X509: {
-        tor_x509_cert_t *x509_cert = tor_x509_cert_decode(cert_body, cert_len);
-        if (!x509_cert) {
-          log_warn(LD_CHANNEL, "QUIC: failed to decode x509 cert, type=%d", cert_type);
-        } else {
-          if (x509_certs[cert_type]) {
-            tor_x509_cert_free(x509_cert);
-            log_warn(LD_CHANNEL, "QUIC: duplicate x509 cert");
-          } else {
-            x509_certs[cert_type] = x509_cert;
-          }
-        }
-        break;
-      }
-      case CERT_ENCODING_ED25519: {
-        tor_cert_t *ed_cert = tor_cert_parse(cert_body, cert_len);
-        if (!ed_cert) {
-          log_warn(LD_CHANNEL, "QUIC: failed to decode ed cert, type=%d", cert_type);
-        } else {
-          if (ed_certs[cert_type]) {
-            tor_cert_free(ed_cert);
-            log_warn(LD_CHANNEL, "QUIC: duplicate ed cert");
-          } else {
-            ed_certs[cert_type] = ed_cert;
-          }
-        }
-        break;
-      }
-
-      case CERT_ENCODING_RSA_CROSSCERT: {
-        if (rsa_ed_cc_cert) {
-          log_warn(LD_CHANNEL, "QUIC: RSA->Ed25519 crosscert");
-        } else {
-          rsa_ed_cc_cert = tor_memdup(cert_body, cert_len);
-          rsa_ed_cc_cert_len = cert_len;
-        }
-        break;
-      }
-    }
-  }
-
-  /* Move the certificates we (might) want into the handshake_state->certs
-   * structure. */
-  tor_x509_cert_t *id_cert = x509_certs[CERTTYPE_RSA1024_ID_ID];
-  tor_x509_cert_t *auth_cert = x509_certs[CERTTYPE_RSA1024_ID_AUTH];
-  tor_x509_cert_t *link_cert = x509_certs[CERTTYPE_RSA1024_ID_LINK];
-  certs->auth_cert = auth_cert;
-  certs->link_cert = link_cert;
-  certs->id_cert = id_cert;
-  x509_certs[CERTTYPE_RSA1024_ID_ID] =
-  x509_certs[CERTTYPE_RSA1024_ID_AUTH] =
-  x509_certs[CERTTYPE_RSA1024_ID_LINK] = NULL;
-
-  tor_cert_t *ed_id_sign = ed_certs[CERTTYPE_ED_ID_SIGN];
-  tor_cert_t *ed_sign_link = ed_certs[CERTTYPE_ED_SIGN_LINK];
-  tor_cert_t *ed_sign_auth = ed_certs[CERTTYPE_ED_SIGN_AUTH];
-  certs->ed_id_sign = ed_id_sign;
-  certs->ed_sign_link = ed_sign_link;
-  certs->ed_sign_auth = ed_sign_auth;
-  ed_certs[CERTTYPE_ED_ID_SIGN] =
-  ed_certs[CERTTYPE_ED_SIGN_LINK] =
-  ed_certs[CERTTYPE_ED_SIGN_AUTH] = NULL;
-
-  certs->ed_rsa_crosscert = rsa_ed_cc_cert;
-  certs->ed_rsa_crosscert_len = rsa_ed_cc_cert_len;
-  rsa_ed_cc_cert = NULL;
-
-  int severity = LOG_WARN;
-  const ed25519_public_key_t *checked_ed_id = NULL;
-  const common_digests_t *checked_rsa_id = NULL;
-  log_info(LD_CHANNEL, "QUIC: checking handshake certs");
-
-  // TODO: actually check this???
-  checked_ed_id = &certs->ed_id_sign->signing_key;
-  checked_rsa_id = tor_x509_cert_get_id_digests(certs->id_cert);
-//  or_handshake_certs_check_both(severity,
-//                                certs,
-//                                NULL,
-//                                time(NULL),
-//                                &checked_ed_id,
-//                                &checked_rsa_id);
-  log_info(LD_CHANNEL, "QUIC: checking handshake certs done, ed=%d, rsa=%d", checked_ed_id, checked_rsa_id);
-}
-
-void send_auth_challenge_cell(channel_quic_t *quicchan) {
-  var_cell_t *cell = NULL;
-  auth_challenge_cell_t *ac = auth_challenge_cell_new();
-
-  tor_assert(sizeof(ac->challenge) == 32);
-  crypto_rand((char *) ac->challenge, sizeof(ac->challenge));
-
-  if (authchallenge_type_is_supported(AUTHTYPE_RSA_SHA256_TLSSECRET))
-    auth_challenge_cell_add_methods(ac, AUTHTYPE_RSA_SHA256_TLSSECRET);
-  if (authchallenge_type_is_supported(AUTHTYPE_ED25519_SHA256_RFC5705))
-    auth_challenge_cell_add_methods(ac, AUTHTYPE_ED25519_SHA256_RFC5705);
-  auth_challenge_cell_set_n_methods(ac,
-                                    auth_challenge_cell_getlen_methods(ac));
-
-  cell = var_cell_new(auth_challenge_cell_encoded_len(ac));
-  ssize_t len = auth_challenge_cell_encode(cell->payload, cell->payload_len,
-                                           ac);
-  if (len != cell->payload_len) {
-    log_warn(LD_BUG, "Encoded auth challenge cell length not as expected");
-    return;
-  }
-  cell->command = CELL_AUTH_CHALLENGE;
-
+  log_info(LD_CHANNEL, "QUIC: sending id started_here=%d, digest=%s", quicchan->started_here, my_hex_digest);
+  var_cell_t *cell = channel_quic_create_id_digest_cell(quicchan, my_digest);
   channel_quic_write_var_cell_method(QUIC_CHAN_TO_BASE(quicchan), cell);
-  var_cell_free(cell);
-  auth_challenge_cell_free(ac);
 }
+
+char *channel_quic_get_my_id(void) {
+  if (!my_digest_id_initialized) {
+    fill_with_random_bytes((uint8_t *) my_digest_id, DIGEST_LEN);
+    log_info(LD_CHANNEL, "QUIC: created new id: %s", hex_str(my_digest_id, DIGEST_LEN));
+    my_digest_id_initialized = 1;
+  }
+  return my_digest_id;
+}
+
+void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state) {
+  orconn_state_msg_t *msg = tor_malloc(sizeof(*msg));
+  const channel_t *chan = CONST_QUIC_CHAN_TO_BASE(quicchan);
+  msg->gid = chan->global_identifier;
+  msg->proxy_type = PROXY_NONE;
+  msg->state = state;
+  msg->chan = chan->global_identifier;
+  orconn_state_publish(msg);
+}
+
+

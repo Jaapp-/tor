@@ -185,90 +185,15 @@ connection_or_send_certs_cell(or_connection_t *conn)
   return 0;
 }
 
-int channel_quic_send_certs_cell(channel_quic_t *quicchan) {
-  const tor_x509_cert_t *global_link_cert = NULL, *id_cert = NULL;
-  var_cell_t *cell;
+var_cell_t *channel_quic_create_id_digest_cell(channel_quic_t *quicchan, char *id_digest) {
+  log_info(LD_CHANNEL, "QUIC: sending id cell");
 
-  certs_cell_t *certs_cell = NULL;
-
-  const int conn_in_server_mode = !quicchan->started_here;
-
-  /* Get the encoded values of the X509 certificates */
-  if (tor_tls_get_my_certs(conn_in_server_mode,
-                           &global_link_cert, &id_cert) < 0) {
-    log_debug(LD_CHANNEL, "QUIC: tor_tls_get_my_certs failed");
-    return -1;
-  }
-
-  /* Link certs are handled by quiche */
-
-//  if (conn_in_server_mode) {
-//    own_link_cert = tor_tls_get_own_cert(conn->tls);
-//  }
-  tor_assert(id_cert);
-
-  certs_cell = certs_cell_new();
-
-//  /* Start adding certs.  First the link cert or auth1024 cert. */
-//  if (conn_in_server_mode) {
-//    tor_assert_nonfatal(own_link_cert);
-//    add_x509_cert(certs_cell,
-//                  OR_CERT_TYPE_TLS_LINK, own_link_cert);
-//  } else {
-//    tor_assert(global_link_cert);
-//    add_x509_cert(certs_cell,
-//                  OR_CERT_TYPE_AUTH_1024, global_link_cert);
-//  }
-
-  /* Next the RSA->RSA ID cert */
-  add_x509_cert(certs_cell,
-                OR_CERT_TYPE_ID_1024, id_cert);
-
-  /* Next the Ed25519 certs */
-  add_ed25519_cert(certs_cell,
-                   CERTTYPE_ED_ID_SIGN,
-                   get_master_signing_key_cert());
-  if (conn_in_server_mode) {
-    add_ed25519_cert(certs_cell,
-                     CERTTYPE_ED_SIGN_LINK,
-                     get_current_link_cert_cert());
-  } else {
-    add_ed25519_cert(certs_cell,
-                     CERTTYPE_ED_SIGN_AUTH,
-                     get_current_auth_key_cert());
-  }
-
-  /* And finally the crosscert. */
-  {
-    const uint8_t *crosscert=NULL;
-    size_t crosscert_len;
-    get_master_rsa_crosscert(&crosscert, &crosscert_len);
-    if (crosscert) {
-      add_certs_cell_cert_helper(certs_cell,
-                                 CERTTYPE_RSA1024_ID_EDID,
-                                 crosscert, crosscert_len);
-    }
-  }
-
-  /* We've added all the certs; make the cell. */
-  certs_cell->n_certs = certs_cell_getlen_certs(certs_cell);
-
-  ssize_t alloc_len = certs_cell_encoded_len(certs_cell);
-  tor_assert(alloc_len >= 0 && alloc_len <= UINT16_MAX);
-  cell = var_cell_new(alloc_len);
-  cell->command = CELL_CERTS;
-  ssize_t enc_len = certs_cell_encode(cell->payload, alloc_len, certs_cell);
-  tor_assert(enc_len > 0 && enc_len <= alloc_len);
-  cell->payload_len = enc_len;
-
-  QUIC_CHAN_TO_BASE(quicchan)->write_var_cell(QUIC_CHAN_TO_BASE(quicchan), cell);
-//  connection_or_write_var_cell_to_buf(cell, conn);
-  var_cell_free(cell);
-  certs_cell_free(certs_cell);
-//  tor_x509_cert_free(own_link_cert);
-
-  return 0;
+  var_cell_t *cell = var_cell_new(DIGEST_LEN);
+  cell->command = CELL_ID_DIGEST;
+  memcpy(cell->payload, id_digest, DIGEST_LEN);
+  return cell;
 }
+
 
 #ifdef TOR_UNIT_TESTS
 int testing__connection_or_pretend_TLSSECRET_is_supported = 0;

@@ -26,6 +26,7 @@ struct channel_quic_t {
     uint8_t inbuf[MAX_DATAGRAM_SIZE];
     uint64_t next_stream_id;
     int started_here;
+    int is_established;
 };
 
 
