@@ -185,12 +185,32 @@ connection_or_send_certs_cell(or_connection_t *conn)
   return 0;
 }
 
-var_cell_t *channel_quic_create_id_digest_cell(channel_quic_t *quicchan, char *id_digest) {
+/**
+ * Create a cell with enough information to learn both peer ids on the other side.
+ *
+ * This approach is *NOT SECURE*, a quick hack because I'm running out of time for this thesis.
+ *
+ * @param id_digest
+ * @return
+ */
+var_cell_t *
+channel_quic_create_id_digest_cell(char *id_digest, int started_here) {
   log_info(LD_CHANNEL, "QUIC: sending id cell");
-
-  var_cell_t *cell = var_cell_new(DIGEST_LEN);
+  size_t size = DIGEST_LEN;
+  const struct tor_cert_st *ed_id_sign;
+  if (!started_here){
+    ed_id_sign = get_master_signing_key_cert();
+    tor_assert(ed_id_sign);
+    size += ed_id_sign->encoded_len;
+  }
+  var_cell_t *cell = var_cell_new(size);
   cell->command = CELL_ID_DIGEST;
+  log_debug(LD_CHANNEL, "QUIC: create id digest cell, size=%zu", size);
+
   memcpy(cell->payload, id_digest, DIGEST_LEN);
+  if (!started_here) {
+    memcpy(cell->payload + DIGEST_LEN, ed_id_sign->encoded, ed_id_sign->encoded_len);
+  }
   return cell;
 }
 

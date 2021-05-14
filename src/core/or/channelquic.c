@@ -40,6 +40,7 @@
 #include "command.h"
 #include "feature/relay/relay_handshake.h"
 #include "feature/relay/routermode.h"
+#include "feature/relay/routerkeys.h"
 #include "var_cell_st.h"
 #include "feature/nodelist/torcert.h"
 #include "lib/tls/x509.h"
@@ -284,8 +285,9 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     channel_quic_flush_egress(quicchan);
   } else {
     if (!quiche_version_is_supported(version)) {
-      log_warn(LD_CHANNEL, "QUIC: Version unsupported, version=%d", version);
-      return -1;
+      log_warn(LD_CHANNEL, "QUIC: Version unsupported, version=%d, addr=%s", version, tor_sockaddr_to_str(
+          (const struct sockaddr *) quicchan->addr));
+      return 0; // TODO
     }
     if (token_len == 0) {
       stateless_retry(scid, scid_len, dcid, dcid_len, token, token_len,
@@ -904,9 +906,23 @@ void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var
 
 void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell) {
   char their_id[DIGEST_LEN];
-  tor_assert(cell->payload_len == DIGEST_LEN);
-  memcpy(their_id, cell->payload, cell->payload_len);
-  log_info(LD_CHANNEL, "QUIC: received id: %s", hex_str(their_id, DIGEST_LEN));
+  memcpy(their_id, cell->payload, DIGEST_LEN);
+  int ed_sign_len = cell->payload_len - DIGEST_LEN;
+  int has_ed_cert = ed_sign_len > 0;
+  tor_cert_t *ed_sign_cert;
+  if (has_ed_cert) {
+    log_info(LD_CHANNEL, "QUIC: received id: %s, ed_size_len: %d", hex_str(their_id, DIGEST_LEN), ed_sign_len);
+    uint8_t encoded_ed_id_sign[ed_sign_len];
+    log_debug(LD_CHANNEL, "QUIC: copying %d bytes to encoded_ed_sign", ed_sign_len);
+    memcpy(encoded_ed_id_sign, cell->payload + DIGEST_LEN, ed_sign_len);
+    log_debug(LD_CHANNEL, "QUIC: parsing encoded_ed_sign", ed_sign_len);
+    ed_sign_cert = tor_cert_parse(encoded_ed_id_sign, ed_sign_len);
+    log_debug(LD_CHANNEL, "QUIC: parsed ed_sign_cert, exists=%d", !!ed_sign_cert);
+    tor_assert(&ed_sign_cert->signing_key);
+  } else {
+    log_info(LD_CHANNEL, "QUIC: received id: %s, no ed cert", hex_str(their_id, DIGEST_LEN));
+  }
+
   if (QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
     channel_t *chan = QUIC_CHAN_TO_BASE(quicchan);
 
@@ -922,7 +938,11 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
 
     log_info(LD_CHANNEL, "QUIC: opening channel");
     channel_set_circid_type(chan, NULL, 0);
-    channel_set_identity_digest(chan, their_id, NULL);
+    if (has_ed_cert) {
+      channel_set_identity_digest(chan, their_id, &ed_sign_cert->signing_key);
+    } else {
+      channel_set_identity_digest(chan, their_id, NULL);
+    }
     channel_change_state_open(chan);
     scheduler_channel_wants_writes(chan);
     channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
@@ -945,8 +965,10 @@ void on_connection_established(channel_quic_t *quicchan) {
   char my_hex_digest[HEX_DIGEST_LEN + 1];
   base16_encode(my_hex_digest, HEX_DIGEST_LEN + 1, my_digest, DIGEST_LEN);
 
+  const struct tor_cert_st *ed_id_sign = get_master_signing_key_cert();
+
   log_info(LD_CHANNEL, "QUIC: sending id started_here=%d, digest=%s", quicchan->started_here, my_hex_digest);
-  var_cell_t *cell = channel_quic_create_id_digest_cell(quicchan, my_digest);
+  var_cell_t *cell = channel_quic_create_id_digest_cell(my_digest, quicchan->started_here);
   channel_quic_write_var_cell_method(QUIC_CHAN_TO_BASE(quicchan), cell);
 }
 
