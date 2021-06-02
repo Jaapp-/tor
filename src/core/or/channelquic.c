@@ -163,7 +163,8 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   channel_quic_common_init(quicchan);
   quicchan->started_here = started_here;
   quicchan->is_established = 0;
-  quicchan->addr = peer_addr;
+  quicchan->addr = malloc(sizeof(struct sockaddr));
+  memcpy(quicchan->addr, peer_addr, sizeof(struct sockaddr_in));
   quicchan->next_stream_id = started_here ? 0 : 1; // Least significant bit of stream ID determines client/server
   memcpy(quicchan->cid, cid, CONN_ID_LEN);
   quicchan->quiche_conn = conn;
@@ -605,8 +606,9 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
                                          0);
   if (sent < 0) {
-    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd", sent,
-             quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd, address=%s, len=%d", sent,
+             quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id), tor_sockaddr_to_str(
+        (const struct sockaddr *) quicchan->addr), n + var_cell->payload_len);
   }
   channel_quic_flush_egress(quicchan);
   return 1;
