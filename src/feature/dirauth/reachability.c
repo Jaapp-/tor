@@ -15,6 +15,7 @@
 #include "app/config/config.h"
 #include "core/or/channel.h"
 #include "core/or/channeltls.h"
+#include "core/or/channelquic.h"
 #include "core/or/command.h"
 #include "feature/dirauth/authmode.h"
 #include "feature/dirauth/dirauth_sys.h"
@@ -130,6 +131,7 @@ void
 dirserv_single_reachability_test(time_t now, routerinfo_t *router)
 {
   const dirauth_options_t *dirauth_options = dirauth_get_options();
+  int quic = get_options()->QUIC;
   channel_t *chan = NULL;
   const node_t *node = NULL;
   const ed25519_public_key_t *ed_id_key;
@@ -151,9 +153,15 @@ dirserv_single_reachability_test(time_t now, routerinfo_t *router)
   log_debug(LD_OR,"Testing reachability of %s at %s:%u.",
             router->nickname, fmt_addr(&router->ipv4_addr),
             router->ipv4_orport);
-  chan = channel_tls_connect(&router->ipv4_addr, router->ipv4_orport,
-                             router->cache_info.identity_digest,
-                             ed_id_key);
+  if (quic) {
+    chan = channel_quic_connect(&router->ipv4_addr, router->ipv4_orport,
+                               router->cache_info.identity_digest,
+                               ed_id_key);
+  } else {
+    chan = channel_tls_connect(&router->ipv4_addr, router->ipv4_orport,
+                               router->cache_info.identity_digest,
+                               ed_id_key);
+  }
   if (chan) command_setup_channel(chan);
 
   /* Possible IPv6. */
@@ -164,9 +172,15 @@ dirserv_single_reachability_test(time_t now, routerinfo_t *router)
               router->nickname,
               tor_addr_to_str(addrstr, &router->ipv6_addr, sizeof(addrstr), 1),
               router->ipv6_orport);
-    chan = channel_tls_connect(&router->ipv6_addr, router->ipv6_orport,
-                               router->cache_info.identity_digest,
-                               ed_id_key);
+    if (quic) {
+      chan = channel_quic_connect(&router->ipv6_addr, router->ipv6_orport,
+                                 router->cache_info.identity_digest,
+                                 ed_id_key);
+    } else {
+      chan = channel_tls_connect(&router->ipv6_addr, router->ipv6_orport,
+                                 router->cache_info.identity_digest,
+                                 ed_id_key);
+    }
     if (chan) command_setup_channel(chan);
   }
 }

@@ -267,9 +267,15 @@ int channel_quic_on_incoming(tor_socket_t sock) {
   channel_quic_t *quicchan = HT_FIND(channel_quic_ht, &quic_ht, &channel_key);
 
   if (quicchan) {
-    int recv = quiche_conn_recv(quicchan->quiche_conn, buf, read);
+    ssize_t recv = quiche_conn_recv(quicchan->quiche_conn, buf, read);
     if (recv < 0) {
-      log_warn(LD_CHANNEL, "QUIC: Receive error on existing channel, recv=%d", recv);
+      log_warn(LD_CHANNEL, "QUIC: Receive error on existing channel, recv=%zd", recv);
+    }
+    quicchan->bootstrap_stage += 1;
+    if (quicchan->bootstrap_stage == 1) {
+      channel_quic_state_publish(quicchan, OR_CONN_STATE_TLS_HANDSHAKING);
+    } else if (quicchan->bootstrap_stage == 2) {
+      channel_quic_state_publish(quicchan, OR_CONN_STATE_OR_HANDSHAKING_V3);
     }
     int established = quiche_conn_is_established(quicchan->quiche_conn);
     if (established) {
@@ -285,8 +291,7 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     channel_quic_flush_egress(quicchan);
   } else {
     if (!quiche_version_is_supported(version)) {
-      log_warn(LD_CHANNEL, "QUIC: Version unsupported, version=%d, addr=%s", version, tor_sockaddr_to_str(
-          (const struct sockaddr *) quicchan->addr));
+      log_warn(LD_CHANNEL, "QUIC: Version unsupported, version=%d", version);
       return 0; // TODO
     }
     if (token_len == 0) {
@@ -522,7 +527,7 @@ channel_quic_has_queued_writes_method(channel_t *chan) {
 
 int channel_quic_is_canonical_method(channel_t *chan) {
   log_notice(LD_CHANNEL, "QUIC: is_canonical requested");
-  return 0; // TODO
+  return 1;
 }
 
 int channel_quic_matches_extend_info_method(channel_t *chan, extend_info_t *extend_info) {
@@ -945,13 +950,14 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
     }
     channel_change_state_open(chan);
     scheduler_channel_wants_writes(chan);
-    channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
+//    channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
   }
 }
 
 void on_connection_established(channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "QUIC: Connection established, sending id cell");
   quicchan->is_established = 1;
+  channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
 
   crypto_pk_t *my_key;
   if (quicchan->started_here) {
