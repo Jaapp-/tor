@@ -566,42 +566,65 @@ router_can_choose_node(const node_t *node, int flags)
     !router_or_conn_should_skip_reachable_address_check(options, pref_addr);
   const bool direct_bridge = direct_conn && options->UseBridges;
 
-  if (!node->is_running || !node->is_valid)
+  if (!node->is_running || !node->is_valid) {
+    log_info(LD_CHANNEL, "QUIC router not running, running=%d, valid=%d", node->is_running, node->is_valid);
     return false;
-  if (need_desc && !node_has_preferred_descriptor(node, direct_conn))
-    return false;
-  if (node->ri) {
-    if (direct_bridge && node->ri->purpose != ROUTER_PURPOSE_BRIDGE)
-      return false;
-    else if (node->ri->purpose != ROUTER_PURPOSE_GENERAL)
-      return false;
   }
-  if (node_is_unreliable(node, need_uptime, need_capacity, need_guard))
+  if (need_desc && !node_has_preferred_descriptor(node, direct_conn)) {
     return false;
+  }
+  if (node->ri) {
+    if (direct_bridge && node->ri->purpose != ROUTER_PURPOSE_BRIDGE) {
+      log_info(LD_CHANNEL, "QUIC router no bridge");
+      return false;
+    }
+    else if (node->ri->purpose != ROUTER_PURPOSE_GENERAL) {
+      log_info(LD_CHANNEL, "QUIC router no general");
+      return false;
+    }
+  }
+  if (node_is_unreliable(node, need_uptime, need_capacity, need_guard)) {
+    log_info(LD_CHANNEL, "QUIC router unreliable");
+    return false;
+  }
   /* Don't choose nodes if we are certain they can't do EXTEND2 cells */
-  if (node->rs && !routerstatus_version_supports_extend2_cells(node->rs, 1))
+  if (node->rs && !routerstatus_version_supports_extend2_cells(node->rs, 1)) {
+    log_info(LD_CHANNEL, "QUIC router no version support");
     return false;
+  }
   /* Don't choose nodes if we are certain they can't do ntor. */
-  if ((node->ri || node->md) && !node_has_curve25519_onion_key(node))
+  if ((node->ri || node->md) && !node_has_curve25519_onion_key(node)) {
+    log_info(LD_CHANNEL, "QUIC router no curve onion key");
     return false;
+  }
   /* Exclude relays that allow single hop exit circuits. This is an
    * obsolete option since 0.2.9.2-alpha and done by default in
    * 0.3.1.0-alpha. */
-  if (node_allows_single_hop_exits(node))
+  if (node_allows_single_hop_exits(node)) {
+    log_info(LD_CHANNEL, "QUIC router no single hop exits");
     return false;
+  }
   /* Exclude relays that can not become a rendezvous for a hidden service
    * version 3. */
   if (rendezvous_v3 &&
-      !node_supports_v3_rendezvous_point(node))
+      !node_supports_v3_rendezvous_point(node)) {
+    log_info(LD_CHANNEL, "QUIC router no rendezvous ");
     return false;
+  }
   /* Choose a node with an OR address that matches the firewall rules */
   if (direct_conn && check_reach &&
       !reachable_addr_allows_node(node,
                                     FIREWALL_OR_CONNECTION,
-                                    pref_addr))
+                                    pref_addr)) {
+    log_info(LD_CHANNEL, "QUIC router reachable");
     return false;
-  if (initiate_ipv6_extend && !node_supports_initiating_ipv6_extends(node))
+  }
+  if (initiate_ipv6_extend && !node_supports_initiating_ipv6_extends(node)) {
+    log_info(LD_CHANNEL, "QUIC router no ipv6 extends");
     return false;
+  }
+
+  log_info(LD_CHANNEL, "QUIC router good");
 
   return true;
 }

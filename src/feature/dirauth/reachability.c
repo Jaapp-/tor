@@ -51,14 +51,17 @@ dirserv_orconn_tls_done(const tor_addr_t *addr,
   tor_assert(digest_rcvd);
 
   node = node_get_mutable_by_id(digest_rcvd);
+  log_info(LD_CHANNEL, "QUIC: orconn_tls_done, node=%d", !!node);
   if (node == NULL || node->ri == NULL)
     return;
 
   ri = node->ri;
 
+  log_info(LD_CHANNEL, "QUIC: orconn_tls_done, ri=%d ed=%d", !!node->ri, node_supports_ed25519_link_authentication(node, 1));
   if (dirauth_get_options()->AuthDirTestEd25519LinkKeys &&
       node_supports_ed25519_link_authentication(node, 1) &&
-      ri->cache_info.signing_key_cert) {
+      ri->cache_info.signing_key_cert)
+  {
     /* We allow the node to have an ed25519 key if we haven't been told one in
      * the routerinfo, but if we *HAVE* been told one in the routerinfo, it
      * needs to match. */
@@ -73,12 +76,15 @@ dirserv_orconn_tls_done(const tor_addr_t *addr,
     }
   }
 
+  log_info(LD_CHANNEL, "QUIC: router has orport %s:%d %s:%d", fmt_addr(addr), or_port, fmt_addr(&ri->ipv4_addr), ri->ipv4_orport);
   tor_addr_copy(&orport.addr, addr);
   orport.port = or_port;
   if (router_has_orport(ri, &orport)) {
+    log_info(LD_CHANNEL, "QUIC: has orport");
     /* Found the right router.  */
     if (!authdir_mode_bridge(get_options()) ||
         ri->purpose == ROUTER_PURPOSE_BRIDGE) {
+      log_info(LD_CHANNEL, "QUIC: is bridge");
       char addrstr[TOR_ADDR_BUF_LEN];
       /* This is a bridge or we're not a bridge authority --
          mark it as reachable.  */

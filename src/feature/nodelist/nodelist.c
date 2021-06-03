@@ -2254,12 +2254,18 @@ int
 node_is_unreliable(const node_t *node, int need_uptime,
                    int need_capacity, int need_guard)
 {
-  if (need_uptime && !node->is_stable)
+  if (need_uptime && !node->is_stable) {
+    log_info(LD_CHANNEL, "QUIC: router not stable");
     return 1;
-  if (need_capacity && !node->is_fast)
+  }
+  if (need_capacity && !node->is_fast) {
+    log_info(LD_CHANNEL, "QUIC: router not fast");
     return 1;
-  if (need_guard && !node->is_possible_guard)
+  }
+  if (need_guard && !node->is_possible_guard) {
+    log_info(LD_CHANNEL, "QUIC: router not possible guard");
     return 1;
+  }
   return 0;
 }
 
