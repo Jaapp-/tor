@@ -203,7 +203,7 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
   uint8_t scid[CONN_ID_LEN];
   fill_with_random_bytes(scid, CONN_ID_LEN);
 
-  log_notice(LD_CHANNEL, "QUIC: connecting addr=%s, cid=%s", tor_sockaddr_to_str((struct sockaddr *) sock_addr),
+  log_info(LD_CHANNEL, "QUIC: connecting addr=%s, cid=%s", tor_sockaddr_to_str((struct sockaddr *) sock_addr),
              fmt_quic_id(scid));
 
   char host[TOR_ADDR_BUF_LEN];
@@ -291,7 +291,7 @@ int channel_quic_on_incoming(tor_socket_t sock) {
       }
       channel_quic_read_streams(quicchan);
     }
-    log_notice(LD_CHANNEL, "QUIC: rx existing recv=%db, cid=%s, addr=%s, established=%d", recv,
+    log_info(LD_CHANNEL, "QUIC: rx existing recv=%db, cid=%s, addr=%s, established=%d", recv,
                fmt_quic_id(dcid),
                tor_sockaddr_to_str(
                    (const struct sockaddr *) &peer_addr), established);
@@ -317,7 +317,7 @@ int channel_quic_on_incoming(tor_socket_t sock) {
     if (recv < 0) {
       log_warn(LD_CHANNEL, "QUIC: receive error, %d", recv);
     }
-    log_notice(LD_CHANNEL, "QUIC: rx new recv=%db, cid=%s, addr=%s", recv, fmt_quic_id(dcid),
+    log_info(LD_CHANNEL, "QUIC: rx new recv=%db, cid=%s, addr=%s", recv, fmt_quic_id(dcid),
                tor_sockaddr_to_str(
                    (const struct sockaddr *) &peer_addr));
     quicchan = channel_quic_create(&peer_addr, dcid, conn, false);
@@ -423,7 +423,7 @@ uint8_t *fill_with_random_bytes(uint8_t *array, size_t array_len) {
 
 static void
 channel_quic_close_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: close chan");
+  log_info(LD_CHANNEL, "QUIC: close chan");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   tor_assert(quicchan);
   int ret = quiche_conn_close(quicchan->quiche_conn, false, 0, (uint8_t *) "close called", 0);
@@ -459,7 +459,7 @@ channel_quic_describe_transport_method(channel_t *chan) {
 
 static void
 channel_quic_free_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: free method");
+  log_info(LD_CHANNEL, "QUIC: free method");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
 
   tor_assert(quicchan);
@@ -475,7 +475,7 @@ channel_quic_get_overhead_estimate_method(channel_t *chan) {
   if (!chan) {
     log_warn(LD_CHANNEL, "channel_quic_get_overhead_estimate_method called without channel");
   }
-  log_notice(LD_CHANNEL, "QUIC: overhead estimate requested");
+  log_info(LD_CHANNEL, "QUIC: overhead estimate requested");
   double overhead = 1.0;
   // TODO
   return overhead;
@@ -486,7 +486,7 @@ static int
 channel_quic_get_remote_addr_method(const channel_t *chan,
                                     tor_addr_t *addr_out) {
 
-  log_notice(LD_CHANNEL, "QUIC: remote addr requested");
+  log_info(LD_CHANNEL, "QUIC: remote addr requested");
   const channel_quic_t *quicchan = CONST_BASE_CHAN_TO_QUIC(chan);
 
   tor_assert(quicchan);
@@ -527,18 +527,18 @@ channel_quic_get_transport_name_method(channel_t *chan, char **transport_out) {
 
 static int
 channel_quic_has_queued_writes_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: has queued writes requestsed");
+  log_info(LD_CHANNEL, "QUIC: has queued writes requestsed");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   return 1; // TODO
 }
 
 int channel_quic_is_canonical_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: is_canonical requested");
+  log_info(LD_CHANNEL, "QUIC: is_canonical requested");
   return 1;
 }
 
 int channel_quic_matches_extend_info_method(channel_t *chan, extend_info_t *extend_info) {
-  log_notice(LD_CHANNEL, "QUIC: matches extend info requested");
+  log_info(LD_CHANNEL, "QUIC: matches extend info requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   tor_assert(quicchan);
   tor_addr_t tor_addr;
@@ -550,7 +550,7 @@ int channel_quic_matches_extend_info_method(channel_t *chan, extend_info_t *exte
 }
 
 int channel_quic_matches_target_method(channel_t *chan, const tor_addr_t *target) {
-  log_notice(LD_CHANNEL, "QUIC: matches target method requestsed");
+  log_info(LD_CHANNEL, "QUIC: matches target method requestsed");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
 
   tor_assert(quicchan);
@@ -562,20 +562,20 @@ int channel_quic_matches_target_method(channel_t *chan, const tor_addr_t *target
 }
 
 int channel_quic_num_cells_writeable_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: num bytes cells writable requested");
+  log_info(LD_CHANNEL, "QUIC: num bytes cells writable requested");
   // Amount of cells within one Datagram, TODO: that's probably not the way, set to higher?
   return MAX_DATAGRAM_SIZE / get_cell_network_size(chan->wide_circ_ids);
 }
 
 size_t channel_quic_num_bytes_queued_method(channel_t *chan) {
-  log_notice(LD_CHANNEL, "QUIC: num bytes queued requested");
+  log_info(LD_CHANNEL, "QUIC: num bytes queued requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   return sizeof(quicchan->outbuf);
 }
 
 
 int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
-  log_notice(LD_CHANNEL, "QUIC: write cell");
+  log_info(LD_CHANNEL, "QUIC: write cell");
   packed_cell_t networkcell;
   cell_pack(&networkcell, cell, chan->wide_circ_ids);
   channel_quic_write_packed_cell_method(chan, &networkcell);
@@ -583,7 +583,7 @@ int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
 }
 
 int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed_cell) {
-  log_notice(LD_CHANNEL, "QUIC: write packed cell");
+  log_info(LD_CHANNEL, "QUIC: write packed cell");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   tor_assert(quicchan);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
@@ -607,7 +607,7 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   n = var_cell_pack_header(var_cell, buf, chan->wide_circ_ids);
   memcpy(buf + n, var_cell->payload, var_cell->payload_len);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
-  log_notice(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len,
+  log_info(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len,
              stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
                                          0);
