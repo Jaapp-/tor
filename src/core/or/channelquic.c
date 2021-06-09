@@ -145,12 +145,6 @@ HT_PROTOTYPE(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_q
 
 void channel_process_auth_challenge_cell(channel_quic_t *quicchan, var_cell_t *cell);
 
-void send_auth_cell(channel_quic_t *quicchan, int use_type);
-
-void channel_quic_send_id_cert_cell(channel_quic_t *quicchan);
-
-char *channel_quic_get_my_id(void);
-
 void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell);
 
 HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal,
@@ -204,7 +198,7 @@ channel_t *channel_quic_connect(const tor_addr_t *addr, uint16_t port, const cha
   fill_with_random_bytes(scid, CONN_ID_LEN);
 
   log_info(LD_CHANNEL, "QUIC: connecting addr=%s, cid=%s", tor_sockaddr_to_str((struct sockaddr *) sock_addr),
-             fmt_quic_id(scid));
+           fmt_quic_id(scid));
 
   char host[TOR_ADDR_BUF_LEN];
   tor_addr_to_str(host, addr, sizeof(host), 0);
@@ -292,9 +286,9 @@ int channel_quic_on_incoming(tor_socket_t sock) {
       channel_quic_read_streams(quicchan);
     }
     log_info(LD_CHANNEL, "QUIC: rx existing recv=%db, cid=%s, addr=%s, established=%d", recv,
-               fmt_quic_id(dcid),
-               tor_sockaddr_to_str(
-                   (const struct sockaddr *) &peer_addr), established);
+             fmt_quic_id(dcid),
+             tor_sockaddr_to_str(
+                 (const struct sockaddr *) &peer_addr), established);
     channel_quic_flush_egress(quicchan);
   } else {
     if (!quiche_version_is_supported(version)) {
@@ -318,8 +312,8 @@ int channel_quic_on_incoming(tor_socket_t sock) {
       log_warn(LD_CHANNEL, "QUIC: receive error, %d", recv);
     }
     log_info(LD_CHANNEL, "QUIC: rx new recv=%db, cid=%s, addr=%s", recv, fmt_quic_id(dcid),
-               tor_sockaddr_to_str(
-                   (const struct sockaddr *) &peer_addr));
+             tor_sockaddr_to_str(
+                 (const struct sockaddr *) &peer_addr));
     quicchan = channel_quic_create(&peer_addr, dcid, conn, false);
     channel_register(QUIC_CHAN_TO_BASE(quicchan));
   }
@@ -608,7 +602,7 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   memcpy(buf + n, var_cell->payload, var_cell->payload_len);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
   log_info(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len,
-             stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+           stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
                                          0);
   if (sent < 0) {
@@ -908,7 +902,6 @@ static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell
 void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var_cell) {
   switch (var_cell->command) {
     case CELL_ID_DIGEST:
-      log_info(LD_CHANNEL, "Received id cert cell");
       channel_quic_handle_id_cert_cell(quicchan, var_cell);
       break;
     default:
@@ -923,10 +916,12 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
   int has_ed_cert = ed_sign_len > 0;
   tor_cert_t *ed_sign_cert;
   if (has_ed_cert) {
-    log_info(LD_CHANNEL, "QUIC: received id: %s, ed_size_len: %d", hex_str(their_id, DIGEST_LEN), ed_sign_len);
+    log_info(LD_CHANNEL, "QUIC: received id: %s, ed_size_len: %d from %s", hex_str(their_id, DIGEST_LEN), ed_sign_len,
+             tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
     uint8_t encoded_ed_id_sign[ed_sign_len];
     memcpy(encoded_ed_id_sign, cell->payload + DIGEST_LEN, ed_sign_len);
     ed_sign_cert = tor_cert_parse(encoded_ed_id_sign, ed_sign_len);
+    tor_assert(ed_sign_cert);
     tor_assert(&ed_sign_cert->signing_key);
   } else {
     log_info(LD_CHANNEL, "QUIC: received id: %s, no ed cert", hex_str(their_id, DIGEST_LEN));
@@ -958,10 +953,10 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
       // that we really used.
       if (has_ed_cert) {
         dirserv_orconn_tls_done(&peer_addr, peer_port,
-                                (const char*)their_id, &ed_sign_cert->signing_key);
+                                (const char *) their_id, &ed_sign_cert->signing_key);
       } else {
         dirserv_orconn_tls_done(&peer_addr, peer_port,
-                                (const char*)their_id, NULL);
+                                (const char *) their_id, NULL);
       }
     }
     channel_change_state_open(chan);
@@ -991,15 +986,6 @@ void on_connection_established(channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "QUIC: sending id started_here=%d, digest=%s", quicchan->started_here, my_hex_digest);
   var_cell_t *cell = channel_quic_create_id_digest_cell(my_digest, quicchan->started_here);
   channel_quic_write_var_cell_method(QUIC_CHAN_TO_BASE(quicchan), cell);
-}
-
-char *channel_quic_get_my_id(void) {
-  if (!my_digest_id_initialized) {
-    fill_with_random_bytes((uint8_t *) my_digest_id, DIGEST_LEN);
-    log_info(LD_CHANNEL, "QUIC: created new id: %s", hex_str(my_digest_id, DIGEST_LEN));
-    my_digest_id_initialized = 1;
-  }
-  return my_digest_id;
 }
 
 void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state) {
