@@ -12,6 +12,7 @@
 
 struct circid_ht_entry_t {
     HT_ENTRY(circid_ht_entry_t) node;
+    int chan_circ_id;
     circid_t circ_id;
     uint64_t stream_id;
 };

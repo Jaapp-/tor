@@ -129,8 +129,13 @@ static void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t s
 
 static void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id);
 
+static int get_circ_map_key(channel_quic_t *quicchan, circid_t circ_id);
+
 static tor_socket_t udp_socket;
 
+/**
+ * Hashmap that maps (chan_id:circ_id) to stream_id
+ */
 static HT_HEAD(circid_ht, circid_ht_entry_t) circs = HT_INITIALIZER();
 
 HT_PROTOTYPE(circid_ht, circid_ht_entry_t, node, circid_entry_hash, circid_entry_equal);
@@ -177,6 +182,8 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
     channel_mark_incoming(chan);
   }
   command_setup_channel(chan);
+  log_debug(LD_CHANNEL, "streamid: new channel=%lu stream_id=%lu, addr=%s", chan->global_identifier, quicchan->next_stream_id,
+            tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
   channel_quic_state_publish(quicchan, OR_CONN_STATE_CONNECTING);
 
   channel_quic_flush_egress(quicchan);
@@ -580,9 +587,9 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
   tor_assert(quicchan);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
-  log_info(LD_CHANNEL, "QUIC: capacity: %zd", quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+  log_info(LD_CHANNEL, "QUIC: sending channel=%lu stream_id=%lu, addr=%s", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, quicchan->next_stream_id,
+            tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
-  log_info(LD_CHANNEL, "QUIC: writing packed cell, size=%zu, stream_id=%lu", cell_network_size, stream_id);
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body,
                                          cell_network_size, 0);
   if (sent < 0) {
@@ -600,8 +607,8 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   n = var_cell_pack_header(var_cell, buf, chan->wide_circ_ids);
   memcpy(buf + n, var_cell->payload, var_cell->payload_len);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
-  log_info(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len,
-           stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
+//  log_info(LD_CHANNEL, "QUIC: writing var cell size=%db, stream_id=%lu, capacity=%zd", n + var_cell->payload_len,
+//           stream_id, quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id));
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
                                          0);
   if (sent < 0) {
@@ -826,14 +833,19 @@ void channel_quic_read_streams(channel_quic_t *quicchan) {
  */
 static uint64_t get_stream_id_for_circuit(channel_quic_t *chan, circid_t circ_id) {
   struct circid_ht_entry_t *key = malloc(sizeof(struct circid_ht_entry_t));
-  key->circ_id = circ_id;
+  int circ_map_key = get_circ_map_key(chan, circ_id);
+  key->chan_circ_id = circ_map_key;
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
-    log_info(LD_CHANNEL, "QUIC: found stream_id=%lu for %d", entry->stream_id, circ_id);
+    log_debug(LD_CHANNEL, "streamid: channel=%lu found stream_id=%lu for %d", QUIC_CHAN_TO_BASE(chan)->global_identifier, entry->stream_id, circ_id);
     return entry->stream_id;
   } else {
-    log_info(LD_CHANNEL, "QUIC: no stream for circ_id=%u, using new stream_id=%lu", circ_id, chan->next_stream_id);
+    key->circ_id = circ_id;
     key->stream_id = chan->next_stream_id;
+    if (!chan->started_here) {
+      key->stream_id += 1;
+    }
+    log_debug(LD_CHANNEL, "streamid: channel=%lu no stream for circ_id=%u, using new stream_id=%lu, started_here=%d", QUIC_CHAN_TO_BASE(chan)->global_identifier,circ_id, key->stream_id, chan->started_here);
     chan->next_stream_id += 4;
 
     HT_REPLACE(circid_ht, &circs, key);
@@ -842,8 +854,11 @@ static uint64_t get_stream_id_for_circuit(channel_quic_t *chan, circid_t circ_id
 }
 
 void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id) {
+  log_debug(LD_CHANNEL, "streamid: incoming channel=%lu stream_id=%lu, addr=%s", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, quicchan->next_stream_id,
+            tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
   struct circid_ht_entry_t *key = malloc(sizeof(struct circid_ht_entry_t));
-  key->circ_id = circ_id;
+  int circ_map_key = get_circ_map_key(quicchan, circ_id);
+  key->chan_circ_id = circ_map_key;
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
     if (entry->stream_id != stream_id) {
@@ -851,8 +866,9 @@ void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t cir
       return;
     };
   } else {
-    log_info(LD_CHANNEL, "QUIC: Received circ_id=%u for new stream_id=%lu, inserting...", circ_id, stream_id);
+    log_debug(LD_CHANNEL, "streamid: channel=%lu circ_id=%u for new stream_id=%lu, inserting...", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, circ_id, stream_id);
     key->stream_id = stream_id;
+    key->circ_id = circ_id;
     HT_REPLACE(circid_ht, &circs, key);
   }
 }
@@ -878,11 +894,11 @@ channel_quic_hash(const channel_quic_t *d) {
 }
 
 unsigned circid_entry_hash(struct circid_ht_entry_t *c) {
-  return c->circ_id;
+  return c->chan_circ_id;
 }
 
 int circid_entry_equal(struct circid_ht_entry_t *c1, struct circid_ht_entry_t *c2) {
-  return c1->circ_id == c2->circ_id;
+  return c1->chan_circ_id == c2->chan_circ_id;
 }
 
 
@@ -980,7 +996,6 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
                                 (const char *) their_id, NULL);
       }
     }
-    channel_change_state_open(chan);
     scheduler_channel_wants_writes(chan);
 //    channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
   }
@@ -989,6 +1004,7 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
 void on_connection_established(channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "QUIC: Connection established, sending id cell");
   rep_hist_note_negotiated_link_proto(3, quicchan->started_here);
+  channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
   quicchan->is_established = 1;
   channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
 
@@ -1019,5 +1035,18 @@ void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state) {
   orconn_state_publish(msg);
 }
 
+/**
+ * Create a hashmap key out of two integers: the global channel id and the circuit id.
+ * Use Szudzik's function to combine these into one.
+ *
+ * https://stackoverflow.com/questions/919612/mapping-two-integers-to-one-in-a-unique-and-deterministic-way
+ */
+int get_circ_map_key(channel_quic_t *quicchan, circid_t circ_id) {
+  uint8_t a = QUIC_CHAN_TO_BASE(quicchan)->global_identifier;
+  uint8_t b = circ_id;
+  int res =  a >= b ? a * a + a + b : a + b * b;
+  log_debug(LD_CHANNEL, "streamid: chan_id=%d circ_id=%d res=%d", a, b, res);
+  return res;
+}
 
 
