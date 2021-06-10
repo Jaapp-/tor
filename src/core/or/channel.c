@@ -1981,6 +1981,9 @@ void
 channel_process_cell(channel_t *chan, cell_t *cell)
 {
   tor_assert(chan);
+  if (!(CHANNEL_IS_CLOSING(chan) || CHANNEL_IS_MAINT(chan) || CHANNEL_IS_OPEN(chan))) {
+    log_warn(LD_CHANNEL, "QUIC: invalid channel state: %d", chan->state);
+  }
   tor_assert(CHANNEL_IS_CLOSING(chan) || CHANNEL_IS_MAINT(chan) ||
              CHANNEL_IS_OPEN(chan));
   tor_assert(cell);

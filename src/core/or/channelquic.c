@@ -127,10 +127,9 @@ static void on_connection_established(channel_quic_t *quicchan);
 
 static void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state);
 
-static tor_socket_t udp_socket;
+static void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id);
 
-static char my_digest_id[DIGEST_LEN];
-static int my_digest_id_initialized = 0;
+static tor_socket_t udp_socket;
 
 static HT_HEAD(circid_ht, circid_ht_entry_t) circs = HT_INITIALIZER();
 
@@ -163,7 +162,7 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   quicchan->is_established = 0;
   quicchan->addr = malloc(sizeof(struct sockaddr));
   memcpy(quicchan->addr, peer_addr, sizeof(struct sockaddr_in));
-  quicchan->next_stream_id = started_here ? 0 : 1; // Least significant bit of stream ID determines client/server
+  quicchan->next_stream_id = 4; // Least significant bit of stream ID determines whether client/server initiated
   memcpy(quicchan->cid, cid, CONN_ID_LEN);
   quicchan->quiche_conn = conn;
 
@@ -606,9 +605,10 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
                                          0);
   if (sent < 0) {
-    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd, address=%s, len=%d", sent,
+    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd, address=%s, len=%d, stream_id=%lu, started_here=%d", sent,
              quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id), tor_sockaddr_to_str(
-        (const struct sockaddr *) quicchan->addr), n + var_cell->payload_len);
+        (const struct sockaddr *) quicchan->addr), n + var_cell->payload_len, stream_id, quicchan->started_here);
+    tor_fragile_assert();
   }
   channel_quic_flush_egress(quicchan);
   return 1;
@@ -800,14 +800,16 @@ void channel_quic_read_streams(channel_quic_t *quicchan) {
       log_info(LD_CHANNEL, "QUIC: received var cell");
       var_cell_t *cell;
       fetch_var_cell_from_buffer((char *) buf, recv_len, &cell, MAX_LINK_PROTO);
-      log_debug(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%d", cell->command,
+      log_debug(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%u", cell->command,
                 cell->payload_len, cell->circ_id);
+      insert_stream_id(quicchan, s, cell->circ_id);
       channel_quic_on_incoming_var_cell(quicchan, cell);
     } else {
       cell_t cell;
       cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
       channel_quic_on_incoming_cell(quicchan, &cell);
-      log_info(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%d, command=%d", cell.circ_id, cell.command);
+      log_info(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%u, command=%d", cell.circ_id, cell.command);
+      insert_stream_id(quicchan, s, cell.circ_id);
     }
   }
 }
@@ -830,12 +832,28 @@ static uint64_t get_stream_id_for_circuit(channel_quic_t *chan, circid_t circ_id
     log_info(LD_CHANNEL, "QUIC: found stream_id=%lu for %d", entry->stream_id, circ_id);
     return entry->stream_id;
   } else {
-    log_info(LD_CHANNEL, "QUIC: no stream for circ_id=%d, using new stream_id=%lu", circ_id, chan->next_stream_id);
+    log_info(LD_CHANNEL, "QUIC: no stream for circ_id=%u, using new stream_id=%lu", circ_id, chan->next_stream_id);
     key->stream_id = chan->next_stream_id;
     chan->next_stream_id += 4;
 
     HT_REPLACE(circid_ht, &circs, key);
     return key->stream_id;
+  }
+}
+
+void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id) {
+  struct circid_ht_entry_t *key = malloc(sizeof(struct circid_ht_entry_t));
+  key->circ_id = circ_id;
+  struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
+  if (entry) {
+    if (entry->stream_id != stream_id) {
+      log_warn(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id, entry->stream_id, circ_id);
+      return;
+    };
+  } else {
+    log_info(LD_CHANNEL, "QUIC: Received circ_id=%u for new stream_id=%lu, inserting...", circ_id, stream_id);
+    key->stream_id = stream_id;
+    HT_REPLACE(circid_ht, &circs, key);
   }
 }
 
@@ -881,6 +899,9 @@ static void cell_unpack(cell_t *dest, const char *src, int wide_circ_ids) {
 }
 
 static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell) {
+  if (QUIC_CHAN_TO_BASE(quicchan)->state == CHANNEL_STATE_OPENING) {
+    log_warn(LD_CHANNEL, "QUIC: incoming cell while opening");
+  }
   switch (cell->command) {
     case CELL_CREATE:
     case CELL_CREATE_FAST:
@@ -997,5 +1018,6 @@ void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state) {
   msg->chan = chan->global_identifier;
   orconn_state_publish(msg);
 }
+
 
 

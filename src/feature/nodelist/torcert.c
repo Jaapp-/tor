@@ -161,16 +161,13 @@ tor_cert_parse(const uint8_t *encoded, const size_t len)
   tor_cert_t *cert = NULL;
   ed25519_cert_t *parsed = NULL;
   ssize_t got_len = ed25519_cert_parse(&parsed, encoded, len);
-  log_debug(LD_CHANNEL, "QUIC: ed got_len: %d", got_len);
   if (got_len < 0 || (size_t) got_len != len)
     goto err;
 
-  log_debug(LD_CHANNEL, "ed encoded");
   cert = tor_malloc_zero(sizeof(tor_cert_t));
   cert->encoded = tor_memdup(encoded, len);
   cert->encoded_len = len;
 
-  log_debug(LD_CHANNEL, "ed pubkey");
   memcpy(cert->signed_key.pubkey, parsed->certified_key, 32);
   int64_t valid_until_64 = ((int64_t)parsed->exp_field) * 3600;
 #if SIZEOF_TIME_T < 8
@@ -180,7 +177,6 @@ tor_cert_parse(const uint8_t *encoded, const size_t len)
   cert->valid_until = (time_t) valid_until_64;
   cert->cert_type = parsed->cert_type;
 
-  log_debug(LD_CHANNEL, "ed extensions");
   for (unsigned i = 0; i < ed25519_cert_getlen_ext(parsed); ++i) {
     ed25519_cert_extension_t *ext = ed25519_cert_get_ext(parsed, i);
     if (ext->ext_type == CERTEXT_SIGNED_WITH_KEY) {
