@@ -117,7 +117,6 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
                       int need_uptime, int need_internal,
                       time_t now)
 {
-  log_info(LD_CHANNEL, "QUIC: checking circuit acceptable: %d", origin_circ->global_identifier);
   const circuit_t *circ = TO_CIRCUIT(origin_circ);
   const node_t *exitnode;
   cpath_build_state_t *build_state;
@@ -125,10 +124,8 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
   tor_assert(conn);
   tor_assert(conn->socks_request);
 
-  log_debug(LD_CHANNEL, "QUIC: got to 1");
   if (must_be_open && (circ->state != CIRCUIT_STATE_OPEN || !circ->n_chan))
     return 0; /* ignore non-open circs */
-  log_debug(LD_CHANNEL, "QUIC: got to 2");
   if (circ->marked_for_close)
     return 0;
 
@@ -187,7 +184,7 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
     return 0;
 
   log_debug(LD_CHANNEL, "QUIC: got to 8");
-  log_info(LD_CHANNEL, "QUIC: circuit_is_acceptable purpose=%d, exitnode=%d, onehop=%d want_onehop=%d, chosen_exit=%s, digest=%s", purpose, exitnode, build_state->onehop_tunnel, conn->want_onehop, conn->chosen_exit_name,
+  log_info(LD_CHANNEL, "QUIC: circuit_is_acceptable purpose=%d, exitnode=%d, onehop=%d want_onehop=%d, chosen_exit=%s, digest=%s", purpose, !!exitnode, build_state->onehop_tunnel, conn->want_onehop, conn->chosen_exit_name,
            hex_str(build_state->chosen_exit->identity_digest, DIGEST_LEN));
   if (purpose == CIRCUIT_PURPOSE_C_GENERAL ||
       purpose == CIRCUIT_PURPOSE_S_HSDIR_POST ||
@@ -2430,7 +2427,7 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
   circ = circuit_get_best(conn, 0 /* don't insist on open circuits */,
                           desired_circuit_purpose,
                           need_uptime, need_internal);
-  log_info(LD_CHANNEL, "QUIC: circ_get_best: %d", circ);
+  log_info(LD_CHANNEL, "QUIC: circ_get_best: %u", circ->global_identifier);
   if (circ)
     log_debug(LD_CIRC, "one on the way!");
 

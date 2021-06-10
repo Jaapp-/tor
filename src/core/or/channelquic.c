@@ -862,7 +862,7 @@ void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t cir
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
     if (entry->stream_id != stream_id) {
-      log_warn(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id, entry->stream_id, circ_id);
+      log_info(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id, entry->stream_id, circ_id);
       return;
     };
   } else {
