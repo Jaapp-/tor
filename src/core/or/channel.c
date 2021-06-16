@@ -2431,11 +2431,13 @@ channel_get_for_extend,(const char *rsa_id_digest,
   tor_assert(launch_out);
 
   chan = channel_find_by_remote_identity(rsa_id_digest, ed_id);
+  log_info(LD_CHANNEL, "bugbug: chan=%d", !!chan);
 
   /* Walk the list of channels */
   for (; chan; chan = channel_next_with_rsa_identity(chan)) {
     tor_assert(tor_memeq(chan->identity_digest,
                          rsa_id_digest, DIGEST_LEN));
+    log_info(LD_CHANNEL, "bugbug: nextchan");
 
    if (CHANNEL_CONDEMNED(chan))
       continue;

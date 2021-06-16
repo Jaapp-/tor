@@ -2436,7 +2436,6 @@ count_usable_descriptors(int *num_present, int *num_usable,
   SMARTLIST_FOREACH_BEGIN(consensus->routerstatus_list, routerstatus_t *, rs)
     {
        const node_t *node = node_get_by_id(rs->identity_digest);
-       log_info(LD_CHANNEL, "QUIC: md usable? digest=%s", node->identity);
        if (!node)
          continue; /* This would be a bug: every entry in the consensus is
                     * supposed to have a node. */
@@ -2459,7 +2458,6 @@ count_usable_descriptors(int *num_present, int *num_usable,
                node_exit_policy_rejects_all(node)) {
                continue;
            }
-           log_info(LD_CHANNEL, "QUIC: md usable: digest=%s", node->identity);
            /* we have the descriptor listed in the consensus, and it
             * satisfies our exit constraints (if any) */
            ++*num_present;

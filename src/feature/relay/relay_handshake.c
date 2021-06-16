@@ -191,7 +191,6 @@ connection_or_send_certs_cell(or_connection_t *conn) {
  */
 var_cell_t *
 channel_quic_create_id_digest_cell(char *id_digest, int started_here) {
-  log_info(LD_CHANNEL, "QUIC: sending id cell");
   size_t size = DIGEST_LEN;
   const struct tor_cert_st *ed_id_sign = get_master_signing_key_cert();
   if (ed_id_sign) {

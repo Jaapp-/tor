@@ -263,6 +263,7 @@ router_do_orport_reachability_checks(const routerinfo_t *me,
                                      int orport_reachable)
 {
   extend_info_t *ei = extend_info_from_router(me, family);
+  log_info(LD_CHANNEL, "QUIC: reachability extend_info_from_me: %d", !!ei);
   int ipv6_flags = (family == AF_INET6 ? CIRCLAUNCH_IS_IPV6_SELFTEST : 0);
 
   /* If we're trying to test IPv6, but we don't have an IPv6 ORPort, ei will
@@ -343,7 +344,6 @@ router_do_reachability_checks(int test_or, int test_dir)
     router_orport_seems_reachable(options, AF_INET);
   int orport_reachable_v6 =
     router_orport_seems_reachable(options, AF_INET6);
-
   if (router_should_check_reachability(test_or, test_dir)) {
     bool need_testing = !circuit_enough_testing_circs();
     /* At the moment, tor relays believe that they are reachable when they
@@ -351,13 +351,16 @@ router_do_reachability_checks(int test_or, int test_dir)
      * family is correct.
      */
     if (test_or && (!orport_reachable_v4 || need_testing)) {
+      log_info(LD_CHANNEL, "QUIC: Test ipv4 reachable: test_or=%d, test_dir=%d", test_or, test_dir);
       router_do_orport_reachability_checks(me, AF_INET, orport_reachable_v4);
     }
     if (test_or && (!orport_reachable_v6 || need_testing)) {
+      log_info(LD_CHANNEL, "QUIC: Test ipv6 reachable: test_or=%d, test_dir=%d", test_or, test_dir);
       router_do_orport_reachability_checks(me, AF_INET6, orport_reachable_v6);
     }
 
     if (test_dir && !router_dirport_seems_reachable(options)) {
+      log_info(LD_CHANNEL, "QUIC: Test dirport reachable: test_or=%d, test_dir=%d", test_or, test_dir);
       router_do_dirport_reachability_checks(me);
     }
   }
