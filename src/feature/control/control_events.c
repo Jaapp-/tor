@@ -16,6 +16,7 @@
 #include "core/mainloop/connection.h"
 #include "core/mainloop/mainloop.h"
 #include "core/or/channeltls.h"
+#include "core/or/channelquic.h"
 #include "core/or/circuitlist.h"
 #include "core/or/circuitstats.h"
 #include "core/or/command.h"
@@ -959,6 +960,50 @@ control_event_or_conn_status(or_connection_t *conn, or_conn_status_event_t tp,
                               orconn_end_reason_to_control_string(reason),
                               ncircs_buf,
                               (conn->base_.global_identifier));
+
+  return 0;
+}
+
+int
+control_event_or_conn_status_quic(channel_quic_t *quicchan, or_conn_status_event_t tp,
+                             int reason)
+{
+  int ncircs = 0;
+  const char *status;
+  char name[128] = "QUIC name";
+  char ncircs_buf[32] = {0}; /* > 8 + log10(2^32)=10 + 2 */
+
+  if (!EVENT_IS_INTERESTING(EVENT_OR_CONN_STATUS))
+    return 0;
+
+  switch (tp)
+  {
+    case OR_CONN_EVENT_LAUNCHED: status = "LAUNCHED"; break;
+    case OR_CONN_EVENT_CONNECTED: status = "CONNECTED"; break;
+    case OR_CONN_EVENT_FAILED: status = "FAILED"; break;
+    case OR_CONN_EVENT_CLOSED: status = "CLOSED"; break;
+    case OR_CONN_EVENT_NEW: status = "NEW"; break;
+    default:
+      log_warn(LD_BUG, "Unrecognized status code %d", (int)tp);
+      return 0;
+  }
+  if (quicchan) {
+    ncircs = circuit_count_pending_on_channel(QUIC_CHAN_TO_BASE(quicchan));
+  } else {
+    ncircs = 0;
+  }
+  ncircs += channel_num_circuits(QUIC_CHAN_TO_BASE(quicchan));
+  if (ncircs && (tp == OR_CONN_EVENT_FAILED || tp == OR_CONN_EVENT_CLOSED)) {
+    tor_snprintf(ncircs_buf, sizeof(ncircs_buf), " NCIRCS=%d", ncircs);
+  }
+
+  send_control_event(EVENT_OR_CONN_STATUS,
+                     "650 ORCONN %s %s%s%s%s ID=%"PRIu64"\r\n",
+                     name, status,
+                     reason ? " REASON=" : "",
+                     orconn_end_reason_to_control_string(reason),
+                     ncircs_buf,
+                     (quicchan->base_.global_identifier));
 
   return 0;
 }

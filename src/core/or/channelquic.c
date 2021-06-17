@@ -50,6 +50,7 @@
 #include "feature/stats/rephist.h"
 #include "feature/dirauth/authmode.h"
 #include "feature/dirauth/reachability.h"
+#include "feature/control/control_events.h"
 
 static void channel_quic_close_method(channel_t *chan);
 
@@ -121,7 +122,7 @@ static void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell
 
 static void on_connection_established(channel_quic_t *quicchan);
 
-static void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state);
+static void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state);
 
 static void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id);
 
@@ -982,8 +983,9 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
     tor_assert(chan);
     // Emulate receiving NETINFO for our test setup
     chan->is_canonical_to_peer = 1;
-    tor_addr_t tor_addr;
-    tor_addr_copy(&chan->addr_according_to_peer, &tor_addr);
+    tor_addr_t my_tor_addr;
+    tor_addr_from_ipv4n(&my_tor_addr, inet_addr("127.0.0.1"));
+    tor_addr_copy(&chan->addr_according_to_peer, &my_tor_addr);
 
     tor_addr_t peer_addr;
     uint16_t peer_port;
@@ -1038,7 +1040,7 @@ void on_connection_established(channel_quic_t *quicchan) {
   channel_quic_write_var_cell_method(QUIC_CHAN_TO_BASE(quicchan), cell);
 }
 
-void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state) {
+void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state) {
   orconn_state_msg_t *msg = tor_malloc(sizeof(*msg));
   const channel_t *chan = CONST_QUIC_CHAN_TO_BASE(quicchan);
   msg->gid = chan->global_identifier;
@@ -1046,4 +1048,5 @@ void channel_quic_state_publish(const channel_quic_t *quicchan, uint8_t state) {
   msg->state = state;
   msg->chan = chan->global_identifier;
   orconn_state_publish(msg);
+  control_event_or_conn_status_quic(quicchan, state, 0);
 }

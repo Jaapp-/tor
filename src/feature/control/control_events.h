@@ -123,6 +123,8 @@ int control_event_stream_status(entry_connection_t *conn,
                                 int reason);
 int control_event_or_conn_status(or_connection_t *conn,
                                  or_conn_status_event_t e, int reason);
+int control_event_or_conn_status_quic(channel_quic_t *quicchan,
+                                 or_conn_status_event_t e, int reason);
 int control_event_bandwidth_used(uint32_t n_read, uint32_t n_written);
 int control_event_stream_bandwidth(edge_connection_t *edge_conn);
 int control_event_stream_bandwidth_used(void);
