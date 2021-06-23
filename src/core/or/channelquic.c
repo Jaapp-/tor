@@ -800,7 +800,6 @@ void channel_quic_read_streams(channel_quic_t *quicchan) {
     ssize_t recv_len =
         quiche_conn_stream_recv(quicchan->quiche_conn, s, buf, sizeof(buf), &fin);
     if (is_var_cell((char *) buf, MAX_LINK_PROTO)) {
-      log_info(LD_CHANNEL, "QUIC: received var cell");
       var_cell_t *cell;
       fetch_var_cell_from_buffer((char *) buf, recv_len, &cell, MAX_LINK_PROTO);
       log_debug(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%u", cell->command,
@@ -810,7 +809,7 @@ void channel_quic_read_streams(channel_quic_t *quicchan) {
     } else {
       cell_t cell;
       cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
-      log_info(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%u, command=%d", cell.circ_id, cell.command);
+      log_debug(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%u, command=%d", cell.circ_id, cell.command);
       insert_stream_id(quicchan, s, cell.circ_id);
       channel_quic_on_incoming_cell(quicchan, &cell);
     }
@@ -864,7 +863,7 @@ void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t cir
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
     if (entry->stream_id != stream_id) {
-      log_info(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id, entry->stream_id, circ_id);
+      log_debug(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id, entry->stream_id, circ_id);
       return;
     };
   } else {

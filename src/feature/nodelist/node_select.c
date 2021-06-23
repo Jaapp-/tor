@@ -962,7 +962,6 @@ router_choose_random_node_helper(smartlist_t *excludednodes,
 
   // Always weight by bandwidth
   choice = node_sl_choose_by_bandwidth(sl, rule);
-  log_info(LD_CHANNEL, "QUIC: router, by bandwidth: %d", !!choice);
 
   smartlist_free(sl);
 

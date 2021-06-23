@@ -146,13 +146,11 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
       return 0;
   }
 
-  log_debug(LD_CHANNEL, "QUIC: got to 3");
   /* If this is a timed-out hidden service circuit, skip it. */
   if (origin_circ->hs_circ_has_timed_out) {
     return 0;
   }
 
-  log_debug(LD_CHANNEL, "QUIC: got to 4");
   if (purpose == CIRCUIT_PURPOSE_C_GENERAL ||
       purpose == CIRCUIT_PURPOSE_C_HSDIR_GET ||
       purpose == CIRCUIT_PURPOSE_S_HSDIR_POST ||
@@ -163,7 +161,6 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
       return 0;
   }
 
-  log_debug(LD_CHANNEL, "QUIC: got to 5");
   if (origin_circ->unusable_for_new_conns)
     return 0;
 
@@ -176,16 +173,11 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
   build_state = origin_circ->build_state;
   exitnode = build_state_get_exit_node(build_state);
 
-  log_debug(LD_CHANNEL, "QUIC: got to 6");
   if (need_uptime && !build_state->need_uptime)
     return 0;
-  log_debug(LD_CHANNEL, "QUIC: got to 7");
   if (need_internal != build_state->is_internal)
     return 0;
 
-  log_debug(LD_CHANNEL, "QUIC: got to 8");
-  log_info(LD_CHANNEL, "QUIC: circuit_is_acceptable purpose=%d, exitnode=%d, onehop=%d want_onehop=%d, chosen_exit=%s, digest=%s", purpose, !!exitnode, build_state->onehop_tunnel, conn->want_onehop, conn->chosen_exit_name,
-           hex_str(build_state->chosen_exit->identity_digest, DIGEST_LEN));
   if (purpose == CIRCUIT_PURPOSE_C_GENERAL ||
       purpose == CIRCUIT_PURPOSE_S_HSDIR_POST ||
       purpose == CIRCUIT_PURPOSE_C_HSDIR_GET) {
@@ -244,14 +236,12 @@ circuit_is_acceptable(const origin_circuit_t *origin_circ,
     }
   }
 
-  log_debug(LD_CHANNEL, "QUIC: got to 9");
 
   if (!connection_edge_compatible_with_circuit(conn, origin_circ)) {
     /* conn needs to be isolated from other conns that have already used
      * origin_circ */
     return 0;
   }
-  log_debug(LD_CHANNEL, "QUIC: got to 10");
 
   return 1;
 }
