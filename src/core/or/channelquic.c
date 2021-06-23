@@ -126,6 +126,8 @@ static void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state);
 
 static void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id);
 
+static void channel_quic_timeout_cb(evutil_socket_t listener, short event, void *arg);
+
 static tor_socket_t udp_socket;
 
 /**
@@ -176,8 +178,15 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   } else {
     channel_mark_incoming(chan);
   }
+
+  struct event *timeout_event =
+      evtimer_new(tor_libevent_get_base(), channel_quic_timeout_cb, (void *) quicchan);
+  quicchan->timer = timeout_event;
+  event_add(timeout_event, NULL);
+
   command_setup_channel(chan);
-  log_debug(LD_CHANNEL, "streamid: new channel=%lu stream_id=%lu, addr=%s", chan->global_identifier, quicchan->next_stream_id,
+  log_debug(LD_CHANNEL, "streamid: new channel=%lu stream_id=%lu, addr=%s", chan->global_identifier,
+            quicchan->next_stream_id,
             tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
   channel_quic_state_publish(quicchan, OR_CONN_STATE_CONNECTING);
 
@@ -287,9 +296,9 @@ int channel_quic_on_incoming(tor_socket_t sock) {
       channel_quic_read_streams(quicchan);
     }
     log_debug(LD_CHANNEL, "QUIC: rx existing recv=%zdb, cid=%s, addr=%s, established=%d", recv,
-             fmt_quic_id(dcid),
-             tor_sockaddr_to_str(
-                 (const struct sockaddr *) &peer_addr), established);
+              fmt_quic_id(dcid),
+              tor_sockaddr_to_str(
+                  (const struct sockaddr *) &peer_addr), established);
     channel_quic_flush_egress(quicchan);
   } else {
     if (!quiche_version_is_supported(version)) {
@@ -313,8 +322,8 @@ int channel_quic_on_incoming(tor_socket_t sock) {
       log_warn(LD_CHANNEL, "QUIC: receive error, %zd", recv);
     }
     log_debug(LD_CHANNEL, "QUIC: rx new recv=%zdb, cid=%s, addr=%s", recv, fmt_quic_id(dcid),
-             tor_sockaddr_to_str(
-                 (const struct sockaddr *) &peer_addr));
+              tor_sockaddr_to_str(
+                  (const struct sockaddr *) &peer_addr));
     quicchan = channel_quic_create(&peer_addr, dcid, conn, false);
     channel_register(QUIC_CHAN_TO_BASE(quicchan));
   }
@@ -375,7 +384,7 @@ quiche_config *create_quiche_config(bool is_client) {
 
   quiche_config_set_application_protos(config,
                                        (uint8_t *) "\x05hq-29\x05hq-28\x05hq-27\x08http/0.9", 27);
-  quiche_config_set_max_idle_timeout(config, 5000);
+  quiche_config_set_max_idle_timeout(config, 0);
   quiche_config_set_max_udp_payload_size(config, MAX_DATAGRAM_SIZE);
   quiche_config_set_initial_max_data(config, 1000000000);
   quiche_config_set_initial_max_stream_data_bidi_local(config, 100000000);
@@ -608,7 +617,8 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
                                          0);
   if (sent < 0) {
-    log_warn(LD_CHANNEL, "QUIC: var cell send failed: %zd, capacity=%zd, address=%s, len=%d, stream_id=%lu, started_here=%d", sent,
+    log_warn(LD_CHANNEL,
+             "QUIC: var cell send failed: %zd, capacity=%zd, address=%s, len=%d, stream_id=%lu, started_here=%d", sent,
              quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id), tor_sockaddr_to_str(
         (const struct sockaddr *) quicchan->addr), n + var_cell->payload_len, stream_id, quicchan->started_here);
     tor_fragile_assert();
@@ -730,11 +740,10 @@ int channel_quic_flush_egress(channel_quic_t *channel) {
                   (const struct sockaddr *) channel->addr));
     channel_timestamp_active(QUIC_CHAN_TO_BASE(channel));
   }
+  uint64_t timeout_nanos = quiche_conn_timeout_as_nanos(channel->quiche_conn);
+  struct timeval timeout = {timeout_nanos / 1000000000, timeout_nanos / 1000 % 1000000};
+  evtimer_add(channel->timer, &timeout);
   return 0;
-  // TODO
-//    double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
-//    conn_io->timer.repeat = t;
-//    ev_timer_again(loop, &conn_io->timer);
 }
 
 int channel_quic_on_listener_initialized(connection_t *conn) {
@@ -835,14 +844,16 @@ static uint64_t get_stream_id_for_circuit(channel_quic_t *quicchan, circid_t cir
   key->circ_id = circ_id;
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
-    log_debug(LD_CHANNEL, "streamid: channel=%lu found stream_id=%lu for %d", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, entry->stream_id, circ_id);
+    log_debug(LD_CHANNEL, "streamid: channel=%lu found stream_id=%lu for %d",
+              QUIC_CHAN_TO_BASE(quicchan)->global_identifier, entry->stream_id, circ_id);
     return entry->stream_id;
   } else {
     key->stream_id = quicchan->next_stream_id;
     if (!quicchan->started_here) {
       key->stream_id += 1;
     }
-    log_debug(LD_CHANNEL, "streamid: channel=%lu no stream for circ_id=%u, using new stream_id=%lu, started_here=%d", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, circ_id, key->stream_id, quicchan->started_here);
+    log_debug(LD_CHANNEL, "streamid: channel=%lu no stream for circ_id=%u, using new stream_id=%lu, started_here=%d",
+              QUIC_CHAN_TO_BASE(quicchan)->global_identifier, circ_id, key->stream_id, quicchan->started_here);
     quicchan->next_stream_id += 4;
 
     log_debug(LD_CHANNEL, "streamid: inserting %lu", key->chan_id);
@@ -852,7 +863,8 @@ static uint64_t get_stream_id_for_circuit(channel_quic_t *quicchan, circid_t cir
 }
 
 void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t circ_id) {
-  log_debug(LD_CHANNEL, "streamid: incoming channel=%lu stream_id=%lu, addr=%s", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, quicchan->next_stream_id,
+  log_debug(LD_CHANNEL, "streamid: incoming channel=%lu stream_id=%lu, addr=%s",
+            QUIC_CHAN_TO_BASE(quicchan)->global_identifier, quicchan->next_stream_id,
             tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
   struct circid_ht_entry_t *key = malloc(sizeof(struct circid_ht_entry_t));
   tor_assert(key);
@@ -863,11 +875,13 @@ void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circid_t cir
   struct circid_ht_entry_t *entry = HT_FIND(circid_ht, &circs, key);
   if (entry) {
     if (entry->stream_id != stream_id) {
-      log_debug(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id, entry->stream_id, circ_id);
+      log_debug(LD_CHANNEL, "QUIC: received stream_id=%lu doesn't match local stream_id=%lu, circ_id=%u", stream_id,
+                entry->stream_id, circ_id);
       return;
     };
   } else {
-    log_debug(LD_CHANNEL, "streamid: channel=%lu circ_id=%u for new stream_id=%lu, inserting...", QUIC_CHAN_TO_BASE(quicchan)->global_identifier, circ_id, stream_id);
+    log_debug(LD_CHANNEL, "streamid: channel=%lu circ_id=%u for new stream_id=%lu, inserting...",
+              QUIC_CHAN_TO_BASE(quicchan)->global_identifier, circ_id, stream_id);
     key->stream_id = stream_id;
     HT_INSERT(circid_ht, &circs, key);
   }
@@ -974,7 +988,8 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
     tor_assert(ed_sign_cert);
     tor_assert(&ed_sign_cert->signing_key);
   } else {
-    log_info(LD_CHANNEL, "QUIC: received id: %s, no ed cert from %s", hex_str(their_id, DIGEST_LEN), tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
+    log_info(LD_CHANNEL, "QUIC: received id: %s, no ed cert from %s", hex_str(their_id, DIGEST_LEN),
+             tor_sockaddr_to_str((const struct sockaddr *) quicchan->addr));
   }
 
   if (QUIC_CHAN_TO_BASE(quicchan)->state != CHANNEL_STATE_OPEN) {
@@ -1048,4 +1063,14 @@ void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state) {
   msg->chan = chan->global_identifier;
   orconn_state_publish(msg);
   control_event_or_conn_status_quic(quicchan, state, 0);
+}
+
+void channel_quic_timeout_cb(int listener, short event, void *arg) {
+  log_info(LD_CHANNEL, "QUIC: timeout cb");
+  struct channel_quic_t *quicchan = arg;
+  quiche_conn_on_timeout(quicchan->quiche_conn);
+  if (quiche_conn_is_closed(quicchan->quiche_conn)) {
+    log_info(LD_CHANNEL, "QUIC: Connection closed due to timeout");
+    channel_change_state(QUIC_CHAN_TO_BASE(quicchan), CHANNEL_STATE_CLOSED);
+  }
 }

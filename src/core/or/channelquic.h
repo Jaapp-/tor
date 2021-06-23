@@ -29,6 +29,7 @@ struct channel_quic_t {
     int started_here;
     int is_established;
     int bootstrap_stage;
+    struct event *timer;
 };
 
 
