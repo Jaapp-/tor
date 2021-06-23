@@ -854,7 +854,7 @@ scheduler_kist_set_full_mode(void)
 int
 scheduler_can_use_kist(void)
 {
-  if (kist_no_kernel_support) {
+  if (kist_no_kernel_support || get_options()->QUIC) {
     /* We have no kernel support so we can't use KIST. */
     return 0;
   }

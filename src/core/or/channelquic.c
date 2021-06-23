@@ -384,7 +384,7 @@ quiche_config *create_quiche_config(bool is_client) {
 
   quiche_config_set_application_protos(config,
                                        (uint8_t *) "\x05hq-29\x05hq-28\x05hq-27\x08http/0.9", 27);
-  quiche_config_set_max_idle_timeout(config, 0);
+  quiche_config_set_max_idle_timeout(config, 3600000);
   quiche_config_set_max_udp_payload_size(config, MAX_DATAGRAM_SIZE);
   quiche_config_set_initial_max_data(config, 1000000000);
   quiche_config_set_initial_max_stream_data_bidi_local(config, 100000000);
