@@ -1446,7 +1446,8 @@ write_packed_cell(channel_t *chan, packed_cell_t *cell)
   }
 
   /* Write the cell on the connection's outbuf. */
-  if (chan->write_packed_cell(chan, cell) < 0) {
+  ret = chan->write_packed_cell(chan, cell) < 0;
+  if (ret < 0) {
     goto done;
   }
   /* Timestamp for transmission */

@@ -162,6 +162,7 @@ channel_quic_create(struct sockaddr_in *peer_addr, uint8_t cid[CONN_ID_LEN], qui
   channel_quic_common_init(quicchan);
   quicchan->started_here = started_here;
   quicchan->is_established = 0;
+  quicchan->queued_cells = 0;
   quicchan->addr = malloc(sizeof(struct sockaddr));
   memcpy(quicchan->addr, peer_addr, sizeof(struct sockaddr_in));
   quicchan->next_stream_id = 4; // Least significant bit of stream ID determines whether client/server initiated
@@ -386,10 +387,11 @@ quiche_config *create_quiche_config(bool is_client) {
                                        (uint8_t *) "\x05hq-29\x05hq-28\x05hq-27\x08http/0.9", 27);
   quiche_config_set_max_idle_timeout(config, 3600000);
   quiche_config_set_max_udp_payload_size(config, MAX_DATAGRAM_SIZE);
-  quiche_config_set_initial_max_data(config, 1000000000);
-  quiche_config_set_initial_max_stream_data_bidi_local(config, 100000000);
-  quiche_config_set_initial_max_stream_data_bidi_remote(config, 100000000);
-  quiche_config_set_initial_max_streams_bidi(config, 100);
+  quiche_config_set_initial_max_data(config, 10000000);
+  quiche_config_set_initial_max_stream_data_bidi_local(config, 10000000);
+  quiche_config_set_initial_max_stream_data_bidi_remote(config, 10000000);
+  quiche_config_set_initial_max_streams_bidi(config, 10000);
+  quiche_config_set_disable_active_migration(config, true);
   quiche_config_set_cc_algorithm(config, QUICHE_CC_RENO);
 
 
@@ -532,8 +534,8 @@ channel_quic_get_transport_name_method(channel_t *chan, char **transport_out) {
 static int
 channel_quic_has_queued_writes_method(channel_t *chan) {
   log_info(LD_CHANNEL, "QUIC: has queued writes requestsed");
-//  channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
-  return 1; // TODO
+  channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  return quicchan->queued_cells > 0;
 }
 
 int channel_quic_is_canonical_method(channel_t *chan) {
@@ -567,14 +569,35 @@ int channel_quic_matches_target_method(channel_t *chan, const tor_addr_t *target
 
 int channel_quic_num_cells_writeable_method(channel_t *chan) {
   log_info(LD_CHANNEL, "QUIC: num bytes cells writable requested");
-  // Amount of cells within one Datagram, TODO: that's probably not the way, set to higher?
-  return MAX_DATAGRAM_SIZE / get_cell_network_size(chan->wide_circ_ids);
+  channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+
+  ssize_t lowest_capacity = SSIZE_T_CEILING;
+  quiche_stream_iter *readable = quiche_conn_writable(quicchan->quiche_conn);
+  uint64_t s = 0;
+  while (quiche_stream_iter_next(readable, &s)) {
+    ssize_t capacity = quiche_conn_stream_capacity(quicchan->quiche_conn, s);
+    if (capacity < lowest_capacity) {
+      log_debug(LD_CHANNEL, "QUIC: chan=%lu capacity for %lu: %zd", chan->global_identifier, s, capacity);
+      lowest_capacity = capacity;
+    }
+  }
+  if (lowest_capacity == SSIZE_T_CEILING) lowest_capacity = 0;
+  // 46 bytes overhead, minus one to remain space for other packets
+  long num = lowest_capacity / (get_cell_network_size(chan->wide_circ_ids) + 46) - 2;
+  log_info(LD_CHANNEL, "QUIC: chan=%lu we can write %ld (%d) cells (capacity=%zd)", chan->global_identifier, num,
+           (int) num,
+           lowest_capacity);
+  if (num > 10000) {
+    log_warn(LD_CHANNEL, "QUIC: capacity > 10000 cells, resetting to 0");
+    num = 0;
+  }
+  return (int) num;
 }
 
 size_t channel_quic_num_bytes_queued_method(channel_t *chan) {
   log_info(LD_CHANNEL, "QUIC: num bytes queued requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
-  return sizeof(quicchan->outbuf);
+  return quicchan->queued_cells * get_cell_network_size(chan->wide_circ_ids);
 }
 
 
@@ -594,12 +617,23 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
       (const struct sockaddr *) quicchan->addr), packed_cell->circ_id);
   tor_assert(quicchan);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
+  ssize_t capacity = quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
+  log_debug(LD_CHANNEL, "QUIC: chan=%lu write_packed cell, capacity=%zd, size=%zu", chan->global_identifier, capacity,
+            cell_network_size);
+  if (capacity > -1 && capacity < cell_network_size) {
+    log_warn(LD_CHANNEL, "QUIC: chan=%lu write_packed_cell, but no capacity %zd < %zd",
+             chan->global_identifier, capacity, cell_network_size);
+    return -1;
+  }
   ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) packed_cell->body,
                                          cell_network_size, 0);
   if (sent < 0) {
     log_warn(LD_CHANNEL, "QUIC: packed cell quiche send failed: %zd", sent);
+  } else if (sent < (long) cell_network_size) {
+    log_warn(LD_CHANNEL, "QUIC: partial packed cell sent %zd/%zu", sent, cell_network_size);
   }
+  quicchan->queued_cells += 1;
   channel_quic_flush_egress(quicchan);
   return 0;
 }
@@ -614,15 +648,23 @@ int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   n = var_cell_pack_header(var_cell, buf, chan->wide_circ_ids);
   memcpy(buf + n, var_cell->payload, var_cell->payload_len);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, var_cell->circ_id);
-  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, n + var_cell->payload_len,
-                                         0);
+  ssize_t capacity = quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id);
+  ssize_t size = n + var_cell->payload_len;
+  if (capacity > -1 && capacity < size) {
+    log_warn(LD_CHANNEL, "QUIC: write_var_cell, but no capacity %zd < %zdd", capacity, size);
+    return -1;
+  }
+  ssize_t sent = quiche_conn_stream_send(quicchan->quiche_conn, stream_id, (uint8_t *) buf, size, 0);
   if (sent < 0) {
     log_warn(LD_CHANNEL,
              "QUIC: var cell send failed: %zd, capacity=%zd, address=%s, len=%d, stream_id=%lu, started_here=%d", sent,
              quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id), tor_sockaddr_to_str(
         (const struct sockaddr *) quicchan->addr), n + var_cell->payload_len, stream_id, quicchan->started_here);
     tor_fragile_assert();
+  } else if (sent != size) {
+    log_warn(LD_CHANNEL, "QUIC: partial var cell sent %zd%zdd", sent, size);
   }
+  quicchan->queued_cells += 1;
   channel_quic_flush_egress(quicchan);
   return 1;
 }
@@ -740,8 +782,11 @@ int channel_quic_flush_egress(channel_quic_t *channel) {
                   (const struct sockaddr *) channel->addr));
     channel_timestamp_active(QUIC_CHAN_TO_BASE(channel));
   }
+  channel->queued_cells = 0;
   uint64_t timeout_nanos = quiche_conn_timeout_as_nanos(channel->quiche_conn);
-  struct timeval timeout = {timeout_nanos / 1000000000, timeout_nanos / 1000 % 1000000};
+  long s = (long) timeout_nanos / 1000000000;
+  log_info(LD_CHANNEL, "QUIC: timeout after %lds, %lu", s, timeout_nanos);
+  struct timeval timeout = {s, timeout_nanos / 1000 % 1000000};
   evtimer_add(channel->timer, &timeout);
   return 0;
 }
@@ -797,7 +842,6 @@ static void mint_token(const uint8_t *dcid, size_t dcid_len,
 }
 
 void channel_quic_read_streams(channel_quic_t *quicchan) {
-  static uint8_t buf[65535];
   if (!quiche_conn_is_established(quicchan->quiche_conn)) return;
   log_debug(LD_CHANNEL, "QUIC: reading streams for %s", fmt_quic_id(quicchan->cid));
   uint64_t s = 0;
@@ -807,17 +851,25 @@ void channel_quic_read_streams(channel_quic_t *quicchan) {
     log_debug(LD_CHANNEL, "QUIC: %s: %lu is readable", fmt_quic_id(quicchan->cid), s);
     bool fin = false;
     ssize_t recv_len =
-        quiche_conn_stream_recv(quicchan->quiche_conn, s, buf, sizeof(buf), &fin);
-    if (is_var_cell((char *) buf, MAX_LINK_PROTO)) {
+        quiche_conn_stream_recv(quicchan->quiche_conn, s, quicchan->inbuf, sizeof(quicchan->inbuf), &fin);
+    log_debug(LD_CHANNEL, "stream_recv %zdb", recv_len);
+    if (is_var_cell((char *) quicchan->inbuf, MAX_LINK_PROTO)) {
+      log_debug(LD_CHANNEL, "is var_cell");
       var_cell_t *cell;
-      fetch_var_cell_from_buffer((char *) buf, recv_len, &cell, MAX_LINK_PROTO);
+      int ret = fetch_var_cell_from_buffer((char *) quicchan->inbuf, recv_len, &cell, MAX_LINK_PROTO);
+      log_debug(LD_CHANNEL, "var_cell_from_buffer ret=%d, cell=%d", ret, !!cell);
+      if (!cell) {
+        log_warn(LD_CHANNEL, "QUIC: incomplete var cell on buffer, skipping...");
+        continue;
+      }
       log_debug(LD_CHANNEL, "QUIC: unpacked var cell, command=%d, payload_len=%d, circ_id=%u", cell->command,
                 cell->payload_len, cell->circ_id);
       insert_stream_id(quicchan, s, cell->circ_id);
       channel_quic_on_incoming_var_cell(quicchan, cell);
     } else {
+      log_debug(LD_CHANNEL, "is not var_cell");
       cell_t cell;
-      cell_unpack(&cell, (char *) buf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
+      cell_unpack(&cell, (char *) quicchan->inbuf, QUIC_CHAN_TO_BASE(quicchan)->wide_circ_ids);
       log_debug(LD_CHANNEL, "QUIC: unpacked cell, circ_id=%u, command=%d", cell.circ_id, cell.command);
       insert_stream_id(quicchan, s, cell.circ_id);
       channel_quic_on_incoming_cell(quicchan, &cell);
@@ -1071,6 +1123,6 @@ void channel_quic_timeout_cb(int listener, short event, void *arg) {
   quiche_conn_on_timeout(quicchan->quiche_conn);
   if (quiche_conn_is_closed(quicchan->quiche_conn)) {
     log_info(LD_CHANNEL, "QUIC: Connection closed due to timeout");
-    channel_change_state(QUIC_CHAN_TO_BASE(quicchan), CHANNEL_STATE_CLOSED);
+    channel_close_from_lower_layer(QUIC_CHAN_TO_BASE(quicchan));
   }
 }
