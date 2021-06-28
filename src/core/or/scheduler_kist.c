@@ -124,7 +124,7 @@ channel_outbuf_length(channel_t *chan)
 {
   tor_assert(chan);
   if (get_options()->QUIC) {
-    return sizeof(BASE_CHAN_TO_QUIC(chan)->outbuf);
+    return BASE_CHAN_TO_QUIC(chan)->queued_cells * get_cell_network_size(chan->wide_circ_ids);
   }
 
   /* In theory, this can not happen because we can not scheduler a channel
@@ -209,7 +209,7 @@ update_socket_info_impl, (socket_table_ent_t *ent))
   tor_assert(ent->chan);
   tor_socket_t sock;
   if (get_options()->QUIC) {
-    log_info(LD_CHANNEL, "QUIC: disabling KIST, we don't support UDP currently");
+    log_debug(LD_CHANNEL, "QUIC: disabling KIST, we don't support UDP currently");
     kist_no_kernel_support = 1;
     goto fallback;
   } else {
