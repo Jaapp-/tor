@@ -2324,7 +2324,6 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
 
   /* Do we know enough directory info to build circuits at all? */
   int have_path = have_enough_path_info(!need_internal);
-  log_info(LD_CHANNEL, "QUIC: there's no open circuit, creating one, have_path=%d", have_path);
 
   if (!want_onehop && (!router_have_minimum_dir_info() || !have_path)) {
     /* If we don't have enough directory information, we can't build
@@ -2417,7 +2416,6 @@ circuit_get_open_circ_or_launch(entry_connection_t *conn,
   circ = circuit_get_best(conn, 0 /* don't insist on open circuits */,
                           desired_circuit_purpose,
                           need_uptime, need_internal);
-  log_info(LD_CHANNEL, "QUIC: circ_get_best: %u", !!circ);
   if (circ)
     log_debug(LD_CIRC, "one on the way!");
 

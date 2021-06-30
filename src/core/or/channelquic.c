@@ -390,11 +390,12 @@ quiche_config *create_quiche_config(bool is_client) {
   quiche_config_set_initial_max_data(config, 10000000);
   quiche_config_set_initial_max_stream_data_bidi_local(config, 10000000);
   quiche_config_set_initial_max_stream_data_bidi_remote(config, 10000000);
+  quiche_config_set_initial_max_stream_data_uni(config, 10000000);
   quiche_config_set_initial_max_streams_bidi(config, 10000);
+  quiche_config_set_initial_max_streams_uni(config, 10000);
   quiche_config_set_disable_active_migration(config, true);
   quiche_config_set_cc_algorithm(config, QUICHE_CC_CUBIC);
   quiche_config_enable_hystart(config, true);
-
 
   if (!is_client) {
     log_debug(LD_CHANNEL, "QUIC: loading certs");
