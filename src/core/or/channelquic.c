@@ -1123,6 +1123,7 @@ void channel_quic_timeout_cb(int listener, short event, void *arg) {
   log_info(LD_CHANNEL, "QUIC: timeout cb");
   struct channel_quic_t *quicchan = arg;
   quiche_conn_on_timeout(quicchan->quiche_conn);
+  channel_quic_flush_egress(quicchan);
   if (quiche_conn_is_closed(quicchan->quiche_conn)) {
     log_info(LD_CHANNEL, "QUIC: Connection closed due to timeout");
     channel_close_from_lower_layer(QUIC_CHAN_TO_BASE(quicchan));
