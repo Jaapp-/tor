@@ -128,6 +128,8 @@ static void insert_stream_id(channel_quic_t *quicchan, uint64_t stream_id, circi
 
 static void channel_quic_timeout_cb(evutil_socket_t listener, short event, void *arg);
 
+static void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell);
+
 static tor_socket_t udp_socket;
 
 /**
@@ -143,10 +145,6 @@ HT_GENERATE2(circid_ht, circid_ht_entry_t, node, circid_entry_hash, circid_entry
 static HT_HEAD(channel_quic_ht, channel_quic_t) quic_ht = HT_INITIALIZER();
 
 HT_PROTOTYPE(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal);
-
-void channel_process_auth_challenge_cell(channel_quic_t *quicchan, var_cell_t *cell);
-
-void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell);
 
 HT_GENERATE2(channel_quic_ht, channel_quic_t, node, channel_quic_hash, channel_quic_equal,
              0.6, tor_reallocarray, tor_free_);
@@ -537,10 +535,12 @@ static int
 channel_quic_has_queued_writes_method(channel_t *chan) {
   log_info(LD_CHANNEL, "QUIC: has queued writes requestsed");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   return quicchan->queued_cells > 0;
 }
 
 int channel_quic_is_canonical_method(channel_t *chan) {
+  tor_assert(chan);
   log_info(LD_CHANNEL, "QUIC: is_canonical requested");
   return 1;
 }
@@ -572,6 +572,7 @@ int channel_quic_matches_target_method(channel_t *chan, const tor_addr_t *target
 int channel_quic_num_cells_writeable_method(channel_t *chan) {
   log_info(LD_CHANNEL, "QUIC: num bytes cells writable requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
 
   ssize_t lowest_capacity = SSIZE_T_CEILING;
   quiche_stream_iter *readable = quiche_conn_writable(quicchan->quiche_conn);
@@ -599,12 +600,14 @@ int channel_quic_num_cells_writeable_method(channel_t *chan) {
 size_t channel_quic_num_bytes_queued_method(channel_t *chan) {
   log_info(LD_CHANNEL, "QUIC: num bytes queued requested");
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   return quicchan->queued_cells * get_cell_network_size(chan->wide_circ_ids);
 }
 
 
 int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   log_info(LD_CHANNEL, "QUIC: Writing cell addr=%s circ_id=%u", tor_sockaddr_to_str(
       (const struct sockaddr *) quicchan->addr), cell->circ_id);
   packed_cell_t networkcell;
@@ -615,15 +618,15 @@ int channel_quic_write_cell_method(channel_t *chan, cell_t *cell) {
 
 int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed_cell) {
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   log_info(LD_CHANNEL, "QUIC: Writing packed cell addr=%s circ_id=%u", tor_sockaddr_to_str(
       (const struct sockaddr *) quicchan->addr), packed_cell->circ_id);
-  tor_assert(quicchan);
   uint64_t stream_id = get_stream_id_for_circuit(quicchan, packed_cell->circ_id);
   ssize_t capacity = quiche_conn_stream_capacity(quicchan->quiche_conn, stream_id);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
   log_debug(LD_CHANNEL, "QUIC: chan=%lu write_packed cell, capacity=%zd, size=%zu", chan->global_identifier, capacity,
             cell_network_size);
-  if (capacity > -1 && capacity < cell_network_size) {
+  if (capacity > -1 && (size_t) capacity < cell_network_size) {
     log_warn(LD_CHANNEL, "QUIC: chan=%lu write_packed_cell, but no capacity %zd < %zd",
              chan->global_identifier, capacity, cell_network_size);
     return -1;
@@ -642,6 +645,7 @@ int channel_quic_write_packed_cell_method(channel_t *chan, packed_cell_t *packed
 
 int channel_quic_write_var_cell_method(channel_t *chan, var_cell_t *var_cell) {
   channel_quic_t *quicchan = BASE_CHAN_TO_QUIC(chan);
+  tor_assert(quicchan);
   log_info(LD_CHANNEL, "QUIC: Writing var cell addr=%s circ_id=%u", tor_sockaddr_to_str(
       (const struct sockaddr *) quicchan->addr), var_cell->circ_id);
   static char buf[MAX_DATAGRAM_SIZE];
@@ -1017,7 +1021,7 @@ static void channel_quic_on_incoming_cell(channel_quic_t *quicchan, cell_t *cell
   }
 }
 
-void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var_cell) {
+static void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var_cell) {
   switch (var_cell->command) {
     case CELL_ID_DIGEST:
       channel_quic_handle_id_cert_cell(quicchan, var_cell);
@@ -1027,7 +1031,7 @@ void channel_quic_on_incoming_var_cell(channel_quic_t *quicchan, var_cell_t *var
   }
 }
 
-void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell) {
+static void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell) {
   char their_id[DIGEST_LEN];
   memcpy(their_id, cell->payload, DIGEST_LEN);
   int ed_sign_len = cell->payload_len - DIGEST_LEN;
@@ -1081,11 +1085,10 @@ void channel_quic_handle_id_cert_cell(channel_quic_t *quicchan, var_cell_t *cell
     }
     channel_change_state_open(QUIC_CHAN_TO_BASE(quicchan));
     scheduler_channel_wants_writes(chan);
-//    channel_quic_state_publish(quicchan, OR_CONN_STATE_OPEN);
   }
 }
 
-void on_connection_established(channel_quic_t *quicchan) {
+static void on_connection_established(channel_quic_t *quicchan) {
   log_info(LD_CHANNEL, "QUIC: Connection established, sending id cell, addr=%s", tor_sockaddr_to_str(
       (const struct sockaddr *) quicchan->addr));
   rep_hist_note_negotiated_link_proto(3, quicchan->started_here);
@@ -1108,7 +1111,7 @@ void on_connection_established(channel_quic_t *quicchan) {
   channel_quic_write_var_cell_method(QUIC_CHAN_TO_BASE(quicchan), cell);
 }
 
-void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state) {
+static void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state) {
   orconn_state_msg_t *msg = tor_malloc(sizeof(*msg));
   const channel_t *chan = CONST_QUIC_CHAN_TO_BASE(quicchan);
   msg->gid = chan->global_identifier;
@@ -1119,7 +1122,7 @@ void channel_quic_state_publish(channel_quic_t *quicchan, uint8_t state) {
   control_event_or_conn_status_quic(quicchan, state, 0);
 }
 
-void channel_quic_timeout_cb(int listener, short event, void *arg) {
+static void channel_quic_timeout_cb(int listener __attribute__((unused)), short event __attribute__((unused)), void *arg) {
   log_info(LD_CHANNEL, "QUIC: timeout cb");
   struct channel_quic_t *quicchan = arg;
   quiche_conn_on_timeout(quicchan->quiche_conn);
