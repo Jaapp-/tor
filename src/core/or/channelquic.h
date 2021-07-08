@@ -17,6 +17,14 @@ struct circid_ht_entry_t {
     uint64_t stream_id;
 };
 
+struct buf_ht_entry_t {
+    HT_ENTRY(buf_ht_entry_t) node;
+    uint64_t chan_id;
+    uint64_t stream_id;
+    bool is_outgoing;
+    buf_t *buf;
+};
+
 struct channel_quic_t {
     channel_t base_;
     HT_ENTRY(channel_quic_t) node;
@@ -32,10 +40,6 @@ struct channel_quic_t {
     int queued_cells;
     struct event *timer;
 };
-
-
-//typedef HT_HEAD(channel_quic_ht, channel_quic_t) channel_quic_ht_t;
-
 
 #define BASE_CHAN_TO_QUIC(c) (channel_quic_from_base((c)))
 #define QUIC_CHAN_TO_BASE(c) (channel_quic_to_base((c)))
